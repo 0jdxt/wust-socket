@@ -1,4 +1,5 @@
-use crate::{frame::Opcode, role::Role};
+use super::Opcode;
+use crate::role::Role;
 
 // -- FAST PATH --
 // Separate ControlFrame struct to allow a fast path for sending single frames (Ping, Pong, Close) which

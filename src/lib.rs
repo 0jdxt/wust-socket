@@ -8,7 +8,7 @@
 
 mod error;
 mod event;
-mod frame;
+mod frames;
 mod message;
 mod ping;
 mod role;

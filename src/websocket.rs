@@ -16,7 +16,7 @@ use base64::engine::{Engine, general_purpose::STANDARD as BASE64};
 use crate::{
     error::CloseReason,
     event::Event,
-    frame::{ControlFrame, DataFrame, Frame, FrameParseResult, Opcode},
+    frames::{ControlFrame, DataFrame, Frame, FrameParseResult, Opcode},
     message::{Message, PartialMessage},
     ping::PingStats,
     role::Role,
@@ -254,9 +254,11 @@ struct Inner {
 impl Inner {
     // send data (bytes) over the websocket
     fn send(&self, bytes: &[u8], ty: Opcode) -> Result<()> {
+        let frame = DataFrame::new(bytes, ty, self.role);
         let mut ws = self.writer.lock().unwrap();
-        let msg = DataFrame::new(bytes, ty, self.role);
-        msg.send(&mut ws)?;
+        for chunk in frame.encode() {
+            ws.write_all(&chunk)?;
+        }
         ws.flush()
     }
 

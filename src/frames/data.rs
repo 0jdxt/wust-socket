@@ -1,13 +1,8 @@
-use std::{
-    io::{Result, Write},
-    net::TcpStream,
-};
-
 use super::Opcode;
 use crate::role::Role;
 
 // -- SLOW PATH --
-// Data Frames may be fragmented or very large hence they need extra processing compared to
+// DataFrames may be fragmented or very large hence they need extra processing compared to
 // ControlFrames
 pub(crate) struct DataFrame<'a> {
     opcode: Opcode,
@@ -24,9 +19,11 @@ impl<'a> DataFrame<'a> {
         }
     }
 
-    pub(crate) fn send(self, stream: &mut TcpStream) -> Result<()> {
+    pub(crate) fn encode(self) -> Vec<Vec<u8>> {
         let mut payload = self.payload;
         let mut first = true;
+        let mut frames = vec![];
+
         while !payload.is_empty() {
             // TODO: handle extended lengths
             let chunk_len = payload.len().min(125);
@@ -42,6 +39,7 @@ impl<'a> DataFrame<'a> {
             };
 
             buf[1] = u8::try_from(chunk_len).expect("length is less than u8::MAX");
+
             // Clients must SEND masked
             if self.role.is_client() {
                 buf[1] |= 0x80;
@@ -51,12 +49,12 @@ impl<'a> DataFrame<'a> {
                 }
             }
 
-            stream.write_all(&buf)?;
+            frames.push(buf);
 
             payload = &payload[chunk_len..];
             first = false;
         }
 
-        Ok(())
+        frames
     }
 }
