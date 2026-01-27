@@ -1,5 +1,5 @@
-/// Close reason codes as specified in [RFC
-/// 6455](https://www.rfc-editor.org/rfc/rfc6455.html#section-7.4)
+/// Close reason codes as specified in
+/// [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html#section-7.4)
 #[repr(u16)]
 pub enum CloseReason {
     /// Normal close

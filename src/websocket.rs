@@ -16,11 +16,13 @@ use base64::engine::{Engine, general_purpose::STANDARD as BASE64};
 use crate::{
     error::CloseReason,
     event::Event,
-    frames::{ControlFrame, DataFrame, Frame, FrameParseResult, Opcode},
+    frames::{ControlFrame, DataFrame, Frame, FrameDecoder, FrameParseResult, Opcode},
     message::{Message, PartialMessage},
     ping::PingStats,
     role::Role,
 };
+
+const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
 /// WebSocket
 pub struct WebSocket {
@@ -114,6 +116,9 @@ impl WebSocket {
             let mut buf = [0u8; 2048];
             let mut partial_msg = None;
 
+            let mut fd = FrameDecoder::new(inner.role);
+            let mut total = 0;
+
             loop {
                 let n = {
                     match inner.reader.lock().unwrap().read(&mut buf) {
@@ -121,7 +126,16 @@ impl WebSocket {
                         Ok(n) => n,
                     }
                 };
-                for result in Frame::parse_bytes(&buf[..n], inner.role) {
+                total += n;
+                if total > MAX_MESSAGE_SIZE {
+                    // close connection with TooBig
+                    let payload: [u8; 2] = CloseReason::TooBig.into();
+                    let _ = inner.close(&payload);
+                    return;
+                }
+
+                fd.push_bytes(&buf[..n]);
+                while let Some(result) = fd.next_frame() {
                     match result {
                         FrameParseResult::Complete(frame) => {
                             if handle_frame(frame, &inner, &mut partial_msg, &event_tx).is_none() {
@@ -129,12 +143,20 @@ impl WebSocket {
                             }
                         }
                         FrameParseResult::Incomplete => {
-                            println!("incomplete frame");
-                        }
-                        FrameParseResult::ProtocolError(reason) => {
-                            let payload: [u8; 2] = reason.into();
-                            let _ = inner.close(&payload);
+                            // break while to read more bytes
                             break;
+                        }
+                        FrameParseResult::ProtoError => {
+                            // close connection with ProtoError
+                            let payload: [u8; 2] = CloseReason::ProtoError.into();
+                            let _ = inner.close(&payload);
+                            return;
+                        }
+                        FrameParseResult::SizeErr => {
+                            // close connection with TooBig
+                            let payload: [u8; 2] = CloseReason::TooBig.into();
+                            let _ = inner.close(&payload);
+                            return;
                         }
                     }
                 }
