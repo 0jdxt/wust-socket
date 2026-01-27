@@ -39,10 +39,6 @@ impl WebSocket {
         TcpStream::connect_timeout(addr, timeout)?.try_into()
     }
 
-    // # Safety
-    // this ignores the handshake and assumes the stream is upgraded already
-    // # Errors
-    // Will fail if cloning the stream fails
     // pub unsafe fn from_raw_stream(stream: TcpStream, role: Role) -> Result<Self> {
     //     let (_tx, rx) = channel();
     //     Ok(Self {
@@ -255,32 +251,32 @@ impl Inner {
     // send data (bytes) over the websocket
     fn send(&self, bytes: &[u8], ty: Opcode) -> Result<()> {
         let frame = DataFrame::new(bytes, ty, self.role);
-        let mut ws = self.writer.lock().unwrap();
-        for chunk in frame.encode() {
-            ws.write_all(&chunk)?;
-        }
-        ws.flush()
+        self.write_chunks(frame.encode())
     }
 
     // send close request
     fn close(&self, payload: &[u8]) -> Result<()> {
-        let bytes = ControlFrame::close(payload, self.role).encode();
-        let mut ws = self.writer.lock().unwrap();
-        ws.write_all(&bytes)?;
-        ws.flush()
+        let frame = ControlFrame::close(payload, self.role);
+        self.write_chunks(std::iter::once(frame.encode()))
     }
 
     // send ping with a timestamp
     fn ping(&self) -> Result<()> {
-        let mut ws = self.writer.lock().unwrap();
-
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_millis();
+            .as_millis()
+            .to_be_bytes();
 
-        let bytes = ControlFrame::ping(&timestamp.to_be_bytes(), self.role).encode();
-        ws.write_all(&bytes)?;
+        let frame = ControlFrame::ping(&timestamp, self.role);
+        self.write_chunks(std::iter::once(frame.encode()))
+    }
+
+    fn write_chunks(&self, chunks: impl IntoIterator<Item = Vec<u8>>) -> Result<()> {
+        let mut ws = self.writer.lock().unwrap();
+        for chunk in chunks {
+            ws.write_all(&chunk)?;
+        }
         ws.flush()
     }
 }
