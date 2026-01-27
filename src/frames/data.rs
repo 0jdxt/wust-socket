@@ -1,6 +1,8 @@
 use super::Opcode;
 use crate::role::Role;
 
+const MAX_FRAME_PAYLOAD: usize = 16 * 1024;
+
 // -- SLOW PATH --
 // DataFrames may be fragmented or very large hence they need extra processing compared to
 // ControlFrames
@@ -22,39 +24,61 @@ impl<'a> DataFrame<'a> {
     pub(crate) fn encode(self) -> Vec<Vec<u8>> {
         let mut payload = self.payload;
         let mut first = true;
-        let mut frames = vec![];
+        let mut chunks = vec![];
 
         while !payload.is_empty() {
-            // TODO: handle extended lengths
-            let chunk_len = payload.len().min(125);
-            let chunk = &payload[..chunk_len];
+            let mut buf = vec![];
 
+            let chunk_len = payload.len().min(MAX_FRAME_PAYLOAD);
+
+            // Set OPCODE and FIN
             let opcode = if first { self.opcode } else { Opcode::Cont };
+            let is_fin = chunk_len == payload.len();
+            buf.push(if is_fin { 0x80 } else { 0 } | opcode as u8);
 
-            let mut buf = vec![0; 6 + chunk_len];
-            buf[0] = if chunk_len == payload.len() {
-                0x80 | opcode as u8
-            } else {
-                opcode as u8
-            };
+            // push LEN
+            // print!("encoding: {opcode:?} ({chunk_len:>3})");
+            match chunk_len {
+                0..=125 => {
+                    // print!("  u8 ");
+                    buf.push(u8::try_from(chunk_len).unwrap());
+                }
+                126..=65535 => {
+                    // print!(" u16 ");
+                    buf.push(126);
+                    buf.extend_from_slice(&u16::try_from(chunk_len).unwrap().to_be_bytes());
+                }
+                _ => {
+                    // print!(" u64 ");
+                    buf.push(127);
+                    buf.extend_from_slice(&u64::try_from(chunk_len).unwrap().to_be_bytes());
+                }
+            }
+            // println!("{buf:?}");
 
-            buf[1] = u8::try_from(chunk_len).expect("length is less than u8::MAX");
+            let chunk = &payload[..chunk_len];
 
             // Clients must SEND masked
             if self.role.is_client() {
+                // set MASK bit
                 buf[1] |= 0x80;
-                rand::fill(&mut buf[2..6]);
+                // get random bytes and push to buf
+                let mut mask_key = [0u8; 4];
+                rand::fill(&mut mask_key);
+                buf.extend_from_slice(&mask_key);
+                // mask bytes
                 for (i, &b) in chunk.iter().enumerate() {
-                    buf[6 + i] = b ^ buf[2 + (i % 4)];
+                    buf.push(b ^ mask_key[i % 4]);
                 }
+            } else {
+                buf.extend_from_slice(chunk);
             }
 
-            frames.push(buf);
-
+            chunks.push(buf);
             payload = &payload[chunk_len..];
             first = false;
         }
 
-        frames
+        chunks
     }
 }
