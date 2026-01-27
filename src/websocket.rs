@@ -179,8 +179,9 @@ fn handle_frame(
         }
         // Reply with pong
         Opcode::Ping => {
+            let bytes = ControlFrame::pong(&frame.payload, inner.role).encode();
             let mut ws = inner.writer.lock().unwrap();
-            let _ = ControlFrame::pong(&frame.payload, inner.role).send(&mut ws);
+            let _ = ws.write_all(&bytes);
         }
         // Build message out of frames
         Opcode::Text | Opcode::Bin | Opcode::Cont => {
@@ -261,8 +262,9 @@ impl Inner {
 
     // send close request
     fn close(&self, payload: &[u8]) -> Result<()> {
+        let bytes = ControlFrame::close(payload, self.role).encode();
         let mut ws = self.writer.lock().unwrap();
-        ControlFrame::close(payload, self.role).send(&mut ws)?;
+        ws.write_all(&bytes)?;
         ws.flush()
     }
 
@@ -275,7 +277,8 @@ impl Inner {
             .unwrap()
             .as_millis();
 
-        ControlFrame::ping(&timestamp.to_be_bytes(), self.role).send(&mut ws)?;
+        let bytes = ControlFrame::ping(&timestamp.to_be_bytes(), self.role).encode();
+        ws.write_all(&bytes)?;
         ws.flush()
     }
 }

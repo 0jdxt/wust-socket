@@ -1,8 +1,8 @@
-pub(crate) mod control;
-pub(crate) mod data;
-pub(crate) mod decode;
+mod control;
+mod data;
+mod decode;
 mod frame;
-pub(crate) mod opcode;
+mod opcode;
 
 pub(crate) use control::ControlFrame;
 pub(crate) use data::DataFrame;
