@@ -1,105 +1,323 @@
-use base64::engine::{general_purpose::STANDARD as BASE64, Engine};
+use std::{
+    collections::HashMap,
+    io::{BufRead, BufReader, Error, ErrorKind, Read, Result, Write},
+    net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{Receiver, Sender, channel},
+    },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Result, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
-use std::time::{SystemTime, UNIX_EPOCH};
+use base64::engine::{Engine, general_purpose::STANDARD as BASE64};
 
 use crate::{
-    structs::{ControlFrame, Frame, Message, MessageType, Opcode, SendMessage},
-    Close,
+    error::CloseReason,
+    event::Event,
+    frame::{ControlFrame, DataFrame, Frame, FrameParseResult, Opcode},
+    message::{Message, PartialMessage},
+    ping::PingStats,
+    role::Role,
 };
 
 /// WebSocket
 pub struct WebSocket {
-    reader: TcpStream,
-    writer: Arc<Mutex<TcpStream>>,
-    ping_stats: Arc<Mutex<PingStats<5>>>,
-    event_rx: Receiver<Message>,
+    inner: Arc<Inner>,
+    event_rx: Receiver<Event>,
 }
 
+// TODO: select client/server
+// potentially Client and Server wrappers
 impl WebSocket {
-    /// Opens a WebSocket connection to a remote host.
-    ///
-    /// `addr` is an address of the remote host. Anything which implements [`ToSocketAddrs`] trait can be supplied for the address; see this trait documentation for concrete examples.
-    ///
-    /// If `addr` yields multiple addresses, `connect` will be attempted with each of the addresses until a connection is successful. If none of the addresses result in a successful connection, the error returned from the last connection attempt (the last address) is returned.
-    ///
-    /// # Examples
-    ///
-    /// Open a WS connection to `127.0.0.1:8080`:
-    ///
-    /// ```no_run
-    /// use wust_socket::WebSocket;
-    ///
-    /// if let Ok(stream) = WebSocket::connect("127.0.0.1:8080") {
-    ///     println!("Connected to the server!");
-    /// } else {
-    ///     println!("Couldn't connect to server...");
-    /// }
-    /// ```
-    ///
-    /// Open a WS connection to `127.0.0.1:8080`. If the connection fails, open
-    /// a WS connection to `127.0.0.1:8081`:
-    ///
-    /// ```no_run
-    /// use std::net::SocketAddr;
-    /// use wust_socket::WebSocket;
-    ///
-    /// let addrs = [
-    ///     SocketAddr::from(([127, 0, 0, 1], 8080)),
-    ///     SocketAddr::from(([127, 0, 0, 1], 8081)),
-    /// ];
-    /// if let Ok(stream) = WebSocket::connect(&addrs[..]) {
-    ///     println!("Connected to the server!");
-    /// } else {
-    ///     println!("Couldn't connect to server...");
-    /// }
-    /// ```
     pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self> {
-        Self::from_tcp(TcpStream::connect(addr)?)
+        TcpStream::connect(addr)?.try_into()
     }
 
-    /// Opens a WS connection to a remote host with a timeout.
-    ///
-    /// Unlike `connect`, `connect_timeout` takes a single [`SocketAddr`] since timeout must be applied to individual addresses.
-    ///
-    /// It is an error to pass a zero `Duration` to this function.
-    ///
     pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> Result<Self> {
-        Self::from_tcp(TcpStream::connect_timeout(addr, timeout)?)
+        TcpStream::connect_timeout(addr, timeout)?.try_into()
     }
 
-    fn from_tcp(mut stream: TcpStream) -> Result<Self> {
+    // # Safety
+    // this ignores the handshake and assumes the stream is upgraded already
+    // # Errors
+    // Will fail if cloning the stream fails
+    // pub unsafe fn from_raw_stream(stream: TcpStream, role: Role) -> Result<Self> {
+    //     let (_tx, rx) = channel();
+    //     Ok(Self {
+    //         inner: Arc::new(Inner {
+    //             closed: AtomicBool::new(false),
+    //             closing: AtomicBool::new(false),
+    //             ping_stats: Mutex::new(PingStats::new()),
+    //             reader: Mutex::new(stream.try_clone()?),
+    //             writer: Mutex::new(stream),
+    //             role,
+    //         }),
+    //         event_rx: rx,
+    //     })
+    // }
+
+    /// Closes the connection.
+    ///
+    /// **NB**: the WS instance can no longer be used after calling this method.
+    pub fn close(&mut self) -> Result<()> {
+        if self.inner.closing.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let payload: [u8; 2] = CloseReason::Normal.into();
+        self.inner.close(&payload)
+    }
+
+    /// Sends a ping to the server.
+    ///
+    /// **NB**: [`WebSocket::latency`] will only update when the corresponding pong arrives.
+    pub fn ping(&self) -> Result<()> { self.inner.ping() }
+
+    pub fn recv(&mut self) -> Option<Event> { self.event_rx.recv().ok() }
+
+    pub fn recv_timeout(&mut self, timeout: Duration) -> Option<Event> {
+        self.event_rx.recv_timeout(timeout).ok()
+    }
+
+    /// Returns the server latency as a [`Duration`] representing the average of the last 5 latencies calculated from pings and corresponding pongs from the server.
+    ///
+    /// This may return `None` if no pongs have been received yet.
+    #[must_use]
+    pub fn latency(&self) -> Option<Duration> { self.inner.ping_stats.lock().unwrap().average() }
+
+    pub fn send_text(&self, text: &str) -> Result<()> {
+        self.inner.send(text.as_bytes(), Opcode::Text)
+    }
+
+    pub fn send_bytes(&mut self, bytes: &[u8]) -> Result<()> { self.inner.send(bytes, Opcode::Bin) }
+
+    /// Start a ping loop in a background thread
+    fn start_ping_loop(&self, interval_secs: u64, event_tx: Sender<Event>) {
+        let inner = self.inner.clone();
+        let interval = Duration::from_secs(interval_secs);
+        thread::spawn(move || {
+            loop {
+                if inner.closing.load(Ordering::Acquire) {
+                    println!("INFO: socket closing, stopping ping loop");
+                    break;
+                }
+                if let Err(e) = inner.ping() {
+                    eprintln!("ERR: Ping failed, stopping ping loop.");
+                    let _ = event_tx.send(Event::Error(e));
+                    break;
+                }
+                thread::sleep(interval);
+            }
+        });
+    }
+
+    fn start_recv_loop(&self, event_tx: Sender<Event>) {
+        let inner = Arc::clone(&self.inner);
+        thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            let mut partial_msg = None;
+
+            loop {
+                let n = {
+                    match inner.reader.lock().unwrap().read(&mut buf) {
+                        Ok(0) | Err(_) => break, // connection closed or error
+                        Ok(n) => n,
+                    }
+                };
+                for result in Frame::parse_bytes(&buf[..n], inner.role) {
+                    match result {
+                        FrameParseResult::Complete(frame) => {
+                            if handle_frame(frame, &inner, &mut partial_msg, &event_tx).is_none() {
+                                return;
+                            }
+                        }
+                        FrameParseResult::Incomplete => {
+                            println!("incomplete frame");
+                        }
+                        FrameParseResult::ProtocolError(reason) => {
+                            let payload: [u8; 2] = reason.into();
+                            let _ = inner.close(&payload);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+fn handle_frame(
+    frame: Frame,
+    inner: &Arc<Inner>,
+    partial_msg: &mut Option<PartialMessage>,
+    event_tx: &Sender<Event>,
+) -> Option<()> {
+    match frame.opcode {
+        // If unsolicited, ignore; otherwise, parse timestamp and calculate latency
+        Opcode::Pong => {
+            // try to parse payload as timestamp,
+            // otherwise its unsolicited and we ignore
+            if let Ok(bytes) = frame.payload.try_into() {
+                let sent = u128::from_be_bytes(bytes);
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+
+                // assume anomalous if latency > u64::MAX
+                if let Ok(latency) = u64::try_from(now - sent) {
+                    inner
+                        .ping_stats
+                        .lock()
+                        .unwrap()
+                        .add(Duration::from_millis(latency));
+
+                    let _ = event_tx.send(Event::Pong(latency));
+                }
+            }
+        }
+        // Reply with pong
+        Opcode::Ping => {
+            let mut ws = inner.writer.lock().unwrap();
+            let _ = ControlFrame::pong(&frame.payload, inner.role).send(&mut ws);
+        }
+        // Build message out of frames
+        Opcode::Text | Opcode::Bin | Opcode::Cont => {
+            // println!("{frame:?}");
+            let partial = match (partial_msg.as_mut(), frame.opcode) {
+                (None, Opcode::Text) => partial_msg.insert(PartialMessage::Text(vec![])),
+                (None, Opcode::Bin) => partial_msg.insert(PartialMessage::Binary(vec![])),
+                (Some(p), Opcode::Cont) => p,
+                _ => {
+                    // if we get a CONT before TEXT or BINARY
+                    // or we get TEXT/BINARY without finishing the last message
+                    // close the connection
+                    let payload: [u8; 2] = CloseReason::ProtoError.into();
+                    let _ = inner.close(&payload);
+                    return None;
+                }
+            };
+
+            partial.push_bytes(&frame.payload);
+
+            if frame.is_fin {
+                let msg = match partial_msg.take().unwrap() {
+                    PartialMessage::Binary(buf) => Message::Binary(buf),
+                    PartialMessage::Text(buf) => {
+                        // if invalid UTF-8 immediately close connection
+                        if let Ok(s) = String::from_utf8(buf) {
+                            Message::Text(s)
+                        } else {
+                            let payload: [u8; 2] = CloseReason::DataError.into();
+                            let _ = inner.close(&payload);
+                            return None;
+                        }
+                    }
+                };
+                let _ = event_tx.send(Event::Message(msg));
+            }
+        }
+        // If closing, shutdown; otherwise, reply with close frame
+        Opcode::Close => {
+            // if not already closing try to send close frame, log err
+            // TODO: make sure close payload is valid
+            if !inner.closing.swap(true, Ordering::AcqRel)
+                && let Err(e) = inner.close(&frame.payload)
+            {
+                eprintln!("ERR: error sending close: {e}");
+                let _ = event_tx.send(Event::Error(e));
+            }
+
+            // request TCP shutdown if still open, ignore errors
+            let mut stream = inner.writer.lock().unwrap();
+            let _ = stream.flush();
+            let _ = stream.shutdown(Shutdown::Both);
+            inner.closed.store(true, Ordering::Release);
+            let _ = event_tx.send(Event::Closed);
+            return None;
+        }
+    }
+    Some(())
+}
+
+struct Inner {
+    reader: Mutex<TcpStream>,
+    writer: Mutex<TcpStream>,
+    ping_stats: Mutex<PingStats<5>>,
+    closing: AtomicBool,
+    closed: AtomicBool,
+    role: Role,
+}
+
+impl Inner {
+    // send data (bytes) over the websocket
+    fn send(&self, bytes: &[u8], ty: Opcode) -> Result<()> {
+        let mut ws = self.writer.lock().unwrap();
+        let msg = DataFrame::new(bytes, ty, self.role);
+        msg.send(&mut ws)?;
+        ws.flush()
+    }
+
+    // send close request
+    fn close(&self, payload: &[u8]) -> Result<()> {
+        let mut ws = self.writer.lock().unwrap();
+        ControlFrame::close(payload, self.role).send(&mut ws)?;
+        ws.flush()
+    }
+
+    // send ping with a timestamp
+    fn ping(&self) -> Result<()> {
+        let mut ws = self.writer.lock().unwrap();
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+
+        ControlFrame::ping(&timestamp.to_be_bytes(), self.role).send(&mut ws)?;
+        ws.flush()
+    }
+}
+
+/// Best-effort close if user forgets to call [`WebSocket::close`].
+impl Drop for WebSocket {
+    fn drop(&mut self) {
+        if !self.inner.closing.load(Ordering::Acquire) {
+            let _ = self.close();
+        }
+    }
+}
+
+/// Takes a [`TcpStream`] and attempts to upgrade the connection to WS.
+impl TryFrom<TcpStream> for WebSocket {
+    /// Returns [`std::io::Error`] if unable to read from or write to the [`TcpStream`], or if there was a handshake failure whilst upgrading the connection.
+    type Error = std::io::Error;
+
+    fn try_from(mut stream: TcpStream) -> std::result::Result<Self, Self::Error> {
         let sec_websocket_key = {
             let mut key_bytes = [0u8; 16];
             rand::fill(&mut key_bytes);
             BASE64.encode(key_bytes)
         };
 
-        let server = stream.peer_addr().unwrap();
-
         let req = format!(
             "GET / HTTP/1.1\r\n\
-            Host: {server}\r\n\
+            Host: {}\r\n\
             Upgrade: websocket\r\n\
             Connection: Upgrade\r\n\
             Sec-WebSocket-Key: {sec_websocket_key}\r\n\
-            Sec-WebSocket-Version: 13\r\n\r\n"
+            Sec-WebSocket-Version: 13\r\n\r\n",
+            stream.peer_addr()?
         );
-
         // send upgrade request
         stream.write_all(req.as_bytes())?;
 
-        let mut reader = BufReader::new(stream);
-
         // get status line and validate status code
+        let mut reader = BufReader::new(stream);
         let mut status_line = String::new();
         reader.read_line(&mut status_line)?;
+
         let mut status_parts = status_line.split_whitespace();
         if status_parts.next().is_none() || status_parts.next() != Some("101") {
             return Err(Error::new(
@@ -133,6 +351,7 @@ impl WebSocket {
                 ));
             }
         }
+
         // validate Connection: upgrade
         match headers.get("Connection").map(|v| v.to_lowercase()) {
             Some(x) if x == "upgrade" => {}
@@ -165,205 +384,19 @@ impl WebSocket {
 
         let (event_tx, event_rx) = channel();
         let stream = reader.into_inner();
-        let mut ws = WebSocket {
-            reader: stream.try_clone().unwrap(),
-            writer: Arc::new(Mutex::new(stream)),
-            ping_stats: Arc::new(Mutex::new(PingStats::new())),
+        let ws = WebSocket {
+            inner: Arc::new(Inner {
+                reader: Mutex::new(stream.try_clone()?),
+                writer: Mutex::new(stream),
+                ping_stats: Mutex::new(PingStats::new()),
+                closing: AtomicBool::new(false),
+                closed: AtomicBool::new(false),
+                role: Role::Client,
+            }),
             event_rx,
         };
-        ws.start_ping_loop(30);
-        ws.start_recv_loop(event_tx);
+        ws.start_recv_loop(event_tx.clone());
+        ws.start_ping_loop(30, event_tx.clone());
         Ok(ws)
-    }
-
-    /// Closes the connection.
-    ///
-    /// **NB**: the WS instance can no longer be used after calling this method.
-    pub fn close(self) -> Result<()> {
-        let mut ws = self.writer.lock().unwrap();
-        ControlFrame::close(&Close::NORMAL).send(&mut ws)
-    }
-
-    /// Sends a ping to the server.
-    ///
-    /// **NB**: [`WebSocket::latency`] will only update when the corresponding pong arrives.
-    pub fn ping(&self) -> Result<()> {
-        let now = Instant::now();
-        let mut ws = self.writer.lock().unwrap();
-        ControlFrame::ping(&now.elapsed().as_millis().to_be_bytes()).send(&mut ws)
-    }
-
-    pub fn recv(&mut self) -> Option<Message> {
-        self.event_rx.recv().ok()
-    }
-
-    pub fn recv_timeout(&mut self, timeout: Duration) -> Option<Message> {
-        self.event_rx.recv_timeout(timeout).ok()
-    }
-
-    /// Returns the server latency as a [`Duration`] representing the average of the last 5 latencies calculated from pings and corresponding pongs from the server.
-    ///
-    /// This may return `None` if no pongs have been received yet.
-    pub fn latency(&self) -> Option<Duration> {
-        self.ping_stats.lock().unwrap().average()
-    }
-
-    pub fn send_text(&mut self, text: &str) -> Result<()> {
-        self.send(text.as_bytes(), Opcode::Text)
-    }
-
-    pub fn send_bytes(&mut self, bytes: &[u8]) -> Result<()> {
-        self.send(bytes, Opcode::Bin)
-    }
-
-    fn send(&mut self, bytes: &[u8], ty: Opcode) -> Result<()> {
-        let mut ws = self.writer.lock().unwrap();
-        let msg = SendMessage::new(bytes, ty);
-        msg.send(&mut ws)
-    }
-
-    /// Start a ping loop in a background thread
-    fn start_ping_loop(&self, interval_secs: u64) {
-        let arc = Arc::clone(&self.writer);
-        thread::spawn(move || {
-            let interval = Duration::from_secs(interval_secs);
-            loop {
-                let now = Instant::now();
-
-                // lock the WebSocket to send ping
-                let result = {
-                    let mut ws = arc.lock().unwrap();
-
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64;
-
-                    ControlFrame::ping(&now.to_be_bytes()).send(&mut ws)
-                };
-
-                if result.is_err() {
-                    eprintln!("Ping failed, stopping ping loop.");
-                    break;
-                }
-
-                // sleep until next interval
-                let elapsed = now.elapsed();
-                if elapsed < interval {
-                    thread::sleep(interval - elapsed);
-                }
-            }
-        });
-    }
-
-    fn start_recv_loop(&mut self, event_tx: Sender<Message>) {
-        let ping = Arc::clone(&self.ping_stats);
-        let mut reader = self.reader.try_clone().unwrap();
-        thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            // for assembling fragmented messages
-            let mut data_buf = Vec::new();
-            let mut message_type = MessageType::Text;
-
-            loop {
-                let n = {
-                    match reader.read(&mut buf) {
-                        Ok(0) | Err(_) => break, // connection closed or error
-                        Ok(n) => n,
-                    }
-                };
-
-                for frame in Frame::parse_bytes(&buf[..n]) {
-                    match frame.opcode {
-                        Opcode::Pong => {
-                            let sent = u64::from_be_bytes(frame.payload.try_into().unwrap());
-
-                            let now = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis() as u64;
-
-                            let latency = now - sent;
-                            let mut ps = ping.lock().unwrap();
-                            ps.add(Duration::from_millis(latency));
-
-                            // TODO: Event struct to send to user
-                            //event_tx.send(Event::Pong(latency)).unwrap();
-                        }
-                        Opcode::Ping => {
-                            // TODO: handle unsent pongs
-                            let _ = ControlFrame::pong(&frame.payload).send(&mut reader);
-                        }
-                        Opcode::Text | Opcode::Bin | Opcode::Cont => {
-                            // println!("{frame:?}");
-
-                            data_buf.extend_from_slice(&frame.payload);
-
-                            match frame.opcode {
-                                Opcode::Bin => message_type = MessageType::Binary,
-                                Opcode::Text => message_type = MessageType::Text,
-                                _ => {}
-                            };
-
-                            if frame.is_fin {
-                                // reassemble message
-                                let msg = Message {
-                                    message_type,
-                                    payload: data_buf.clone(),
-                                };
-                                event_tx.send(msg).unwrap();
-                                data_buf.clear();
-                            }
-                        }
-                        Opcode::Close => return,
-                    }
-                }
-            }
-        });
-    }
-}
-
-/// Takes a [`TcpStream`] and attempts to upgrade the connection to WS.
-impl TryFrom<TcpStream> for WebSocket {
-    /// Returns [`std::io::Error`] if unable to read from or write to the [`TcpStream`], or if there was a handshake failure whilst upgrading the connection.
-    type Error = std::io::Error;
-
-    fn try_from(stream: TcpStream) -> std::result::Result<Self, Self::Error> {
-        Self::from_tcp(stream)
-    }
-}
-
-struct PingStats<const N: usize> {
-    history: [Option<Duration>; N],
-    idx: usize,
-}
-
-impl<const N: usize> PingStats<N> {
-    fn new() -> Self {
-        Self {
-            history: [None; N],
-            idx: 0,
-        }
-    }
-
-    fn add(&mut self, rtt: Duration) {
-        self.history[self.idx] = Some(rtt);
-        self.idx = (self.idx + 1) % N;
-    }
-
-    fn average(&self) -> Option<Duration> {
-        let mut sum = Duration::ZERO;
-        let mut count = 0;
-        for &x in &self.history {
-            if let Some(v) = x {
-                sum += v;
-                count += 1;
-            }
-        }
-        if count > 0 {
-            Some(sum / count)
-        } else {
-            None
-        }
     }
 }

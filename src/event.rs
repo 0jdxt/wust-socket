@@ -1,0 +1,15 @@
+use crate::message::Message;
+
+/// `Event`s are produced by [`WebSocket::recv`](crate::WebSocket::recv)
+/// and [`WebSocket::recv_timeout`](crate::WebSocket::recv_timeout)
+#[derive(Debug)]
+pub enum Event {
+    /// Pong event with its latency in milliseconds.
+    Pong(u64),
+    /// A text or binary message.
+    Message(Message),
+    /// The connection to the websocket has been closed.
+    Closed,
+    /// An `io::Error`
+    Error(std::io::Error),
+}

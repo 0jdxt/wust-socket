@@ -1,27 +1,24 @@
-use std::io::BufRead;
-use std::io::BufReader;
-use std::io::Write;
-use std::net::TcpListener;
-use std::sync::mpsc;
+use std::{
+    io::{BufRead, BufReader, Write},
+    net::TcpListener,
+    thread,
+    time::Duration,
+};
 
 use wust_socket::WebSocket;
 
 #[test]
 fn handshake_and_close() {
     let server = "127.0.0.1:6969";
-    let (tx, rx) = mpsc::channel::<()>();
 
     // dummy server
     std::thread::spawn(move || {
         let listener = TcpListener::bind(server).unwrap();
-        // signal server is ready
-        tx.send(()).unwrap();
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
             let mut reader = BufReader::new(&mut stream);
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
-
             // parse headers into a HashMap
             let mut headers = std::collections::HashMap::new();
             loop {
@@ -53,13 +50,13 @@ fn handshake_and_close() {
                  Connection: Upgrade\r\n\
                  Sec-WebSocket-Accept: {accept}\r\n\r\n"
             );
+
             reader.into_inner().write_all(resp.as_bytes()).unwrap();
         }
     });
 
-    // receive signal that server is ready
-    rx.recv().unwrap();
-
     // client side, just handshake and close cleanly
-    WebSocket::connect(server).unwrap().close().unwrap();
+    thread::sleep(Duration::from_millis(50));
+    let mut ws = WebSocket::connect(server).unwrap();
+    ws.close().unwrap();
 }
