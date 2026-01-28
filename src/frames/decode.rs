@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 use super::{Frame, Opcode};
 use crate::role::Role;
 
+const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+
 pub(crate) enum FrameParseResult {
     Complete(Frame),
     Incomplete,
@@ -18,6 +20,7 @@ pub(crate) struct FrameDecoder {
     opcode: Option<Opcode>,
     is_fin: bool,
     role: Role,
+    current_msg_len: usize,
 }
 
 #[derive(Debug)]
@@ -39,6 +42,7 @@ impl FrameDecoder {
             opcode: None,
             is_fin: false,
             role,
+            current_msg_len: 0,
         }
     }
 
@@ -55,17 +59,10 @@ impl FrameDecoder {
                     }
                     self.is_fin = b & 0x80 != 0;
 
-                    self.opcode = Some(match b & 0x0F {
-                        0x0 => Opcode::Cont,
-                        0x1 => Opcode::Text,
-                        0x2 => Opcode::Bin,
-                        0x8 => Opcode::Close,
-                        0x9 => Opcode::Ping,
-                        0xA => Opcode::Pong,
-                        _ => {
-                            return Some(FrameParseResult::ProtoError);
-                        }
-                    });
+                    self.opcode = match Opcode::try_from(b & 0x0F).ok() {
+                        Some(opcode) => Some(opcode),
+                        None => return Some(FrameParseResult::ProtoError),
+                    };
 
                     self.state = DecodeState::Header2;
                 }
@@ -73,13 +70,24 @@ impl FrameDecoder {
                     let Some(b) = self.buf.pop_front() else {
                         return Some(FrameParseResult::Incomplete);
                     };
+
                     let masked = (b & 0x80) != 0;
                     // Servers must NOT mask message
                     if self.role.is_server() != masked {
                         return Some(FrameParseResult::ProtoError);
                     }
+                    self.mask_key = if masked { Some([0; 4]) } else { None };
 
                     let len = (b & 0x7F) as usize;
+                    // Validate control frame size
+                    if matches!(
+                        self.opcode.unwrap(),
+                        Opcode::Ping | Opcode::Pong | Opcode::Close
+                    ) && (!self.is_fin || len > 125)
+                    {
+                        return Some(FrameParseResult::ProtoError);
+                    }
+
                     self.state = if len > 125 {
                         DecodeState::ExtendLen(len)
                     } else {
@@ -90,7 +98,6 @@ impl FrameDecoder {
                             DecodeState::Payload
                         }
                     };
-                    self.mask_key = if masked { Some([0; 4]) } else { None };
                 }
                 DecodeState::ExtendLen(len) => {
                     self.payload_len = if len == 126 {
@@ -98,38 +105,31 @@ impl FrameDecoder {
                         if self.buf.len() < 2 {
                             return Some(FrameParseResult::Incomplete);
                         }
-                        u16::from_be_bytes([
+
+                        usize::from(u16::from_be_bytes([
                             self.buf.pop_front().unwrap(),
                             self.buf.pop_front().unwrap(),
-                        ]) as usize
+                        ]))
                     } else {
                         // 8 bytes
                         if self.buf.len() < 8 {
                             return Some(FrameParseResult::Incomplete);
                         }
-                        let raw_len = u64::from_be_bytes([
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                        ]);
-                        usize::try_from(raw_len)
-                            .map_err(|_| FrameParseResult::SizeErr)
-                            .ok()?
-                    };
 
-                    // Validate control frame size
-                    if matches!(
-                        self.opcode.unwrap(),
-                        Opcode::Ping | Opcode::Pong | Opcode::Close
-                    ) && (!self.is_fin || self.payload_len > 125)
-                    {
-                        return Some(FrameParseResult::ProtoError);
-                    }
+                        let Ok(len) = usize::try_from(u64::from_be_bytes([
+                            self.buf.pop_front().unwrap(),
+                            self.buf.pop_front().unwrap(),
+                            self.buf.pop_front().unwrap(),
+                            self.buf.pop_front().unwrap(),
+                            self.buf.pop_front().unwrap(),
+                            self.buf.pop_front().unwrap(),
+                            self.buf.pop_front().unwrap(),
+                            self.buf.pop_front().unwrap(),
+                        ])) else {
+                            return Some(FrameParseResult::SizeErr);
+                        };
+                        len
+                    };
 
                     self.state = if self.mask_key.is_some() {
                         DecodeState::Mask
@@ -141,21 +141,34 @@ impl FrameDecoder {
                     if self.buf.len() < 4 {
                         return Some(FrameParseResult::Incomplete);
                     }
-                    let key: [u8; 4] = self.buf.drain(..4).collect::<Vec<u8>>().try_into().unwrap();
-                    self.mask_key = Some(key);
+
+                    self.mask_key = Some([
+                        self.buf.pop_front().unwrap(),
+                        self.buf.pop_front().unwrap(),
+                        self.buf.pop_front().unwrap(),
+                        self.buf.pop_front().unwrap(),
+                    ]);
                     self.state = DecodeState::Payload;
                 }
                 DecodeState::Payload => {
                     if self.buf.len() < self.payload_len {
                         return Some(FrameParseResult::Incomplete);
                     }
+
+                    if self.current_msg_len + self.payload_len > MAX_MESSAGE_SIZE {
+                        return Some(FrameParseResult::SizeErr);
+                    }
+                    self.current_msg_len += self.payload_len;
+
                     let mut payload: Vec<u8> = self.buf.drain(..self.payload_len).collect();
                     if let Some(mask) = self.mask_key {
-                        for i in 0..payload.len() {
+                        for i in 0..self.payload_len {
                             payload[i] ^= mask[i % 4];
                         }
                     }
+
                     self.state = DecodeState::Header1;
+
                     return Some(FrameParseResult::Complete(Frame {
                         opcode: self.opcode.unwrap(),
                         is_fin: self.is_fin,

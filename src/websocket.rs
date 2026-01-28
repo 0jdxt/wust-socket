@@ -22,8 +22,6 @@ use crate::{
     role::Role,
 };
 
-const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
-
 /// WebSocket
 pub struct WebSocket {
     inner: Arc<Inner>,
@@ -117,7 +115,6 @@ impl WebSocket {
             let mut partial_msg = None;
 
             let mut fd = FrameDecoder::new(inner.role);
-            let mut total = 0;
 
             loop {
                 let n = {
@@ -126,13 +123,6 @@ impl WebSocket {
                         Ok(n) => n,
                     }
                 };
-                total += n;
-                if total > MAX_MESSAGE_SIZE {
-                    // close connection with TooBig
-                    let payload: [u8; 2] = CloseReason::TooBig.into();
-                    let _ = inner.close(&payload);
-                    return;
-                }
 
                 fd.push_bytes(&buf[..n]);
                 while let Some(result) = fd.next_frame() {
@@ -240,7 +230,6 @@ fn handle_frame(
         // If closing, shutdown; otherwise, reply with close frame
         Opcode::Close => {
             // if not already closing try to send close frame, log err
-            // TODO: make sure close payload is valid
             if !inner.closing.swap(true, Ordering::AcqRel)
                 && let Err(e) = inner.close(&frame.payload)
             {

@@ -8,3 +8,19 @@ pub(crate) enum Opcode {
     Ping = 0x9,
     Pong = 0xA,
 }
+
+impl TryFrom<u8> for Opcode {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x0 => Ok(Opcode::Cont),
+            0x1 => Ok(Opcode::Text),
+            0x2 => Ok(Opcode::Bin),
+            0x8 => Ok(Opcode::Close),
+            0x9 => Ok(Opcode::Ping),
+            0xA => Ok(Opcode::Pong),
+            _ => Err(()),
+        }
+    }
+}
