@@ -9,6 +9,17 @@ pub(crate) enum Opcode {
     Pong = 0xA,
 }
 
+impl Opcode {
+    pub(crate) fn is_control(self) -> bool {
+        matches!(self, Opcode::Close | Opcode::Ping | Opcode::Pong)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn is_data(self) -> bool {
+        matches!(self, Opcode::Bin | Opcode::Text | Opcode::Cont)
+    }
+}
+
 impl TryFrom<u8> for Opcode {
     type Error = ();
 
