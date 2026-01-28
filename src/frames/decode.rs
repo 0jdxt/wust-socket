@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{array, collections::VecDeque};
 
 use super::{Frame, Opcode};
 use crate::role::Role;
@@ -15,10 +15,6 @@ pub(crate) enum FrameParseResult {
 pub(crate) struct FrameDecoder {
     buf: VecDeque<u8>,
     state: DecodeState,
-    payload_len: usize,
-    mask_key: Option<[u8; 4]>,
-    opcode: Option<Opcode>,
-    is_fin: bool,
     role: Role,
     current_msg_len: usize,
 }
@@ -26,10 +22,27 @@ pub(crate) struct FrameDecoder {
 #[derive(Debug)]
 enum DecodeState {
     Header1,
-    Header2,
-    ExtendLen(usize),
-    Mask,
-    Payload,
+    Header2 {
+        is_fin: bool,
+        opcode: Opcode,
+    },
+    ExtendedLen {
+        is_fin: bool,
+        opcode: Opcode,
+        payload_len: usize,
+        masked: bool,
+    },
+    Mask {
+        is_fin: bool,
+        opcode: Opcode,
+        payload_len: usize,
+    },
+    Payload {
+        is_fin: bool,
+        opcode: Opcode,
+        payload_len: usize,
+        mask_key: Option<[u8; 4]>,
+    },
 }
 
 impl FrameDecoder {
@@ -37,10 +50,6 @@ impl FrameDecoder {
         Self {
             buf: VecDeque::new(),
             state: DecodeState::Header1,
-            payload_len: 0,
-            mask_key: None,
-            opcode: None,
-            is_fin: false,
             role,
             current_msg_len: 0,
         }
@@ -57,16 +66,17 @@ impl FrameDecoder {
                     if b & 0b0111_0000 > 0 {
                         return Some(FrameParseResult::ProtoError);
                     }
-                    self.is_fin = b & 0x80 != 0;
 
-                    self.opcode = match Opcode::try_from(b & 0x0F).ok() {
-                        Some(opcode) => Some(opcode),
-                        None => return Some(FrameParseResult::ProtoError),
+                    let Some(opcode) = Opcode::try_from(b & 0x0F).ok() else {
+                        return Some(FrameParseResult::ProtoError);
                     };
 
-                    self.state = DecodeState::Header2;
+                    self.state = DecodeState::Header2 {
+                        is_fin: b & 0x80 > 0,
+                        opcode,
+                    };
                 }
-                DecodeState::Header2 => {
+                DecodeState::Header2 { is_fin, opcode } => {
                     let Some(b) = self.buf.pop_front() else {
                         return Some(FrameParseResult::Incomplete);
                     };
@@ -76,106 +86,130 @@ impl FrameDecoder {
                     if self.role.is_server() != masked {
                         return Some(FrameParseResult::ProtoError);
                     }
-                    self.mask_key = if masked { Some([0; 4]) } else { None };
 
-                    let len = (b & 0x7F) as usize;
+                    let payload_len = (b & 0x7F) as usize;
                     // Validate control frame size
-                    if matches!(
-                        self.opcode.unwrap(),
-                        Opcode::Ping | Opcode::Pong | Opcode::Close
-                    ) && (!self.is_fin || len > 125)
+                    if matches!(opcode, Opcode::Ping | Opcode::Pong | Opcode::Close)
+                        && (!is_fin || payload_len > 125)
                     {
                         return Some(FrameParseResult::ProtoError);
                     }
 
-                    self.state = if len > 125 {
-                        DecodeState::ExtendLen(len)
+                    self.state = if payload_len > 125 {
+                        DecodeState::ExtendedLen {
+                            is_fin,
+                            opcode,
+                            payload_len,
+                            masked,
+                        }
+                    } else if masked {
+                        DecodeState::Mask {
+                            is_fin,
+                            opcode,
+                            payload_len,
+                        }
                     } else {
-                        self.payload_len = len;
-                        if masked {
-                            DecodeState::Mask
-                        } else {
-                            DecodeState::Payload
+                        DecodeState::Payload {
+                            is_fin,
+                            opcode,
+                            payload_len,
+                            mask_key: None,
                         }
                     };
                 }
-                DecodeState::ExtendLen(len) => {
-                    self.payload_len = if len == 126 {
-                        // 2 bytes
-                        if self.buf.len() < 2 {
+                DecodeState::ExtendedLen {
+                    is_fin,
+                    opcode,
+                    payload_len,
+                    masked,
+                } => {
+                    // 126 => 2 bytes extended
+                    // 127 => 8 bytes extended
+                    let payload_len = if payload_len == 126 {
+                        let Some(len_bytes) = pop_n(&mut self.buf) else {
                             return Some(FrameParseResult::Incomplete);
-                        }
-
-                        usize::from(u16::from_be_bytes([
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                        ]))
+                        };
+                        usize::from(u16::from_be_bytes(len_bytes))
                     } else {
-                        // 8 bytes
-                        if self.buf.len() < 8 {
+                        let Some(len_bytes) = pop_n(&mut self.buf) else {
                             return Some(FrameParseResult::Incomplete);
-                        }
+                        };
 
-                        let Ok(len) = usize::try_from(u64::from_be_bytes([
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                            self.buf.pop_front().unwrap(),
-                        ])) else {
+                        let Ok(len) = usize::try_from(u64::from_be_bytes(len_bytes)) else {
                             return Some(FrameParseResult::SizeErr);
                         };
+
                         len
                     };
 
-                    self.state = if self.mask_key.is_some() {
-                        DecodeState::Mask
+                    self.state = if masked {
+                        DecodeState::Mask {
+                            is_fin,
+                            opcode,
+                            payload_len,
+                        }
                     } else {
-                        DecodeState::Payload
+                        DecodeState::Payload {
+                            is_fin,
+                            opcode,
+                            payload_len,
+                            mask_key: None,
+                        }
                     };
                 }
-                DecodeState::Mask => {
-                    if self.buf.len() < 4 {
+                DecodeState::Mask {
+                    is_fin,
+                    opcode,
+                    payload_len,
+                } => {
+                    let Some(x) = pop_n(&mut self.buf) else {
                         return Some(FrameParseResult::Incomplete);
-                    }
-
-                    self.mask_key = Some([
-                        self.buf.pop_front().unwrap(),
-                        self.buf.pop_front().unwrap(),
-                        self.buf.pop_front().unwrap(),
-                        self.buf.pop_front().unwrap(),
-                    ]);
-                    self.state = DecodeState::Payload;
+                    };
+                    self.state = DecodeState::Payload {
+                        is_fin,
+                        opcode,
+                        payload_len,
+                        mask_key: Some(x),
+                    };
                 }
-                DecodeState::Payload => {
-                    if self.buf.len() < self.payload_len {
+                DecodeState::Payload {
+                    is_fin,
+                    opcode,
+                    payload_len,
+                    mask_key,
+                } => {
+                    if self.buf.len() < payload_len {
                         return Some(FrameParseResult::Incomplete);
                     }
 
-                    if self.current_msg_len + self.payload_len > MAX_MESSAGE_SIZE {
+                    if self.current_msg_len + payload_len > MAX_MESSAGE_SIZE {
                         return Some(FrameParseResult::SizeErr);
                     }
-                    self.current_msg_len += self.payload_len;
+                    self.current_msg_len += payload_len;
 
-                    let mut payload: Vec<u8> = self.buf.drain(..self.payload_len).collect();
-                    if let Some(mask) = self.mask_key {
-                        for i in 0..self.payload_len {
-                            payload[i] ^= mask[i % 4];
-                        }
+                    let mut payload: Vec<u8> = self.buf.drain(..payload_len).collect();
+                    if let Some(mask) = mask_key {
+                        payload.iter_mut().enumerate().for_each(|(i, b)| {
+                            *b ^= mask[i % 4];
+                        });
                     }
 
                     self.state = DecodeState::Header1;
 
                     return Some(FrameParseResult::Complete(Frame {
-                        opcode: self.opcode.unwrap(),
-                        is_fin: self.is_fin,
+                        opcode,
                         payload,
+                        is_fin,
                     }));
                 }
             }
         }
     }
+}
+
+fn pop_n<const N: usize>(buf: &mut VecDeque<u8>) -> Option<[u8; N]> {
+    if N > buf.len() {
+        return None;
+    }
+    Some(array::from_fn(|_| buf.pop_front().unwrap()))
 }
