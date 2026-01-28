@@ -15,6 +15,7 @@ pub(crate) enum FrameParseResult {
 pub(crate) struct FrameDecoder {
     buf: VecDeque<u8>,
     state: DecodeState,
+    ctx: DecodeContext,
     role: Role,
     current_msg_len: usize,
 }
@@ -22,27 +23,19 @@ pub(crate) struct FrameDecoder {
 #[derive(Debug)]
 enum DecodeState {
     Header1,
-    Header2 {
-        is_fin: bool,
-        opcode: Opcode,
-    },
-    ExtendedLen {
-        is_fin: bool,
-        opcode: Opcode,
-        payload_len: usize,
-        masked: bool,
-    },
-    Mask {
-        is_fin: bool,
-        opcode: Opcode,
-        payload_len: usize,
-    },
-    Payload {
-        is_fin: bool,
-        opcode: Opcode,
-        payload_len: usize,
-        mask_key: Option<[u8; 4]>,
-    },
+    Header2,
+    ExtendedLen,
+    Mask,
+    Payload,
+}
+
+#[derive(Debug)]
+struct DecodeContext {
+    is_fin: bool,
+    opcode: Opcode,
+    payload_len: usize,
+    mask_key: Option<[u8; 4]>,
+    masked: bool,
 }
 
 impl FrameDecoder {
@@ -52,6 +45,13 @@ impl FrameDecoder {
             state: DecodeState::Header1,
             role,
             current_msg_len: 0,
+            ctx: DecodeContext {
+                is_fin: false,
+                opcode: Opcode::Cont,
+                payload_len: 0,
+                mask_key: None,
+                masked: false,
+            },
         }
     }
 
@@ -59,151 +59,129 @@ impl FrameDecoder {
 
     pub(crate) fn next_frame(&mut self) -> Option<FrameParseResult> {
         loop {
-            match self.state {
+            let next_state = match self.state {
                 DecodeState::Header1 => {
                     let b = self.buf.pop_front()?;
-                    // check RSV bits
-                    if b & 0b0111_0000 > 0 {
-                        return Some(FrameParseResult::ProtoError);
+                    match self.parse_header1(b) {
+                        Ok(state) => state,
+                        Err(e) => return Some(e),
                     }
-
-                    let Some(opcode) = Opcode::try_from(b & 0x0F).ok() else {
-                        return Some(FrameParseResult::ProtoError);
-                    };
-
-                    self.state = DecodeState::Header2 {
-                        is_fin: b & 0x80 > 0,
-                        opcode,
-                    };
                 }
-                DecodeState::Header2 { is_fin, opcode } => {
-                    let Some(b) = self.buf.pop_front() else {
-                        return Some(FrameParseResult::Incomplete);
-                    };
-
-                    let masked = (b & 0x80) != 0;
-                    // Servers must NOT mask message
-                    if self.role.is_server() != masked {
-                        return Some(FrameParseResult::ProtoError);
+                DecodeState::Header2 => match self.parse_header2() {
+                    Ok(state) => state,
+                    Err(e) => {
+                        return Some(e);
                     }
-
-                    let payload_len = (b & 0x7F) as usize;
-                    // Validate control frame size
-                    if matches!(opcode, Opcode::Ping | Opcode::Pong | Opcode::Close)
-                        && (!is_fin || payload_len > 125)
-                    {
-                        return Some(FrameParseResult::ProtoError);
-                    }
-
-                    self.state = if payload_len > 125 {
-                        DecodeState::ExtendedLen {
-                            is_fin,
-                            opcode,
-                            payload_len,
-                            masked,
-                        }
-                    } else if masked {
-                        DecodeState::Mask {
-                            is_fin,
-                            opcode,
-                            payload_len,
-                        }
-                    } else {
-                        DecodeState::Payload {
-                            is_fin,
-                            opcode,
-                            payload_len,
-                            mask_key: None,
-                        }
-                    };
-                }
-                DecodeState::ExtendedLen {
-                    is_fin,
-                    opcode,
-                    payload_len,
-                    masked,
-                } => {
-                    // 126 => 2 bytes extended
-                    // 127 => 8 bytes extended
-                    let payload_len = if payload_len == 126 {
-                        let Some(len_bytes) = pop_n(&mut self.buf) else {
-                            return Some(FrameParseResult::Incomplete);
-                        };
-                        usize::from(u16::from_be_bytes(len_bytes))
-                    } else {
-                        let Some(len_bytes) = pop_n(&mut self.buf) else {
-                            return Some(FrameParseResult::Incomplete);
-                        };
-
-                        let Ok(len) = usize::try_from(u64::from_be_bytes(len_bytes)) else {
-                            return Some(FrameParseResult::SizeErr);
-                        };
-
-                        len
-                    };
-
-                    self.state = if masked {
-                        DecodeState::Mask {
-                            is_fin,
-                            opcode,
-                            payload_len,
-                        }
-                    } else {
-                        DecodeState::Payload {
-                            is_fin,
-                            opcode,
-                            payload_len,
-                            mask_key: None,
-                        }
-                    };
-                }
-                DecodeState::Mask {
-                    is_fin,
-                    opcode,
-                    payload_len,
-                } => {
+                },
+                DecodeState::ExtendedLen => match self.parse_extended_len() {
+                    Ok(state) => state,
+                    Err(e) => return Some(e),
+                },
+                DecodeState::Mask => {
                     let Some(x) = pop_n(&mut self.buf) else {
                         return Some(FrameParseResult::Incomplete);
                     };
-                    self.state = DecodeState::Payload {
-                        is_fin,
-                        opcode,
-                        payload_len,
-                        mask_key: Some(x),
+                    self.ctx.mask_key = Some(x);
+                    DecodeState::Payload
+                }
+                DecodeState::Payload => {
+                    return match self.parse_payload() {
+                        Ok(payload) => {
+                            self.state = DecodeState::Header1;
+                            Some(FrameParseResult::Complete(Frame {
+                                opcode: self.ctx.opcode,
+                                payload,
+                                is_fin: self.ctx.is_fin,
+                            }))
+                        }
+                        Err(e) => Some(e),
                     };
                 }
-                DecodeState::Payload {
-                    is_fin,
-                    opcode,
-                    payload_len,
-                    mask_key,
-                } => {
-                    if self.buf.len() < payload_len {
-                        return Some(FrameParseResult::Incomplete);
-                    }
-
-                    if self.current_msg_len + payload_len > MAX_MESSAGE_SIZE {
-                        return Some(FrameParseResult::SizeErr);
-                    }
-                    self.current_msg_len += payload_len;
-
-                    let mut payload: Vec<u8> = self.buf.drain(..payload_len).collect();
-                    if let Some(mask) = mask_key {
-                        payload.iter_mut().enumerate().for_each(|(i, b)| {
-                            *b ^= mask[i % 4];
-                        });
-                    }
-
-                    self.state = DecodeState::Header1;
-
-                    return Some(FrameParseResult::Complete(Frame {
-                        opcode,
-                        payload,
-                        is_fin,
-                    }));
-                }
-            }
+            };
+            self.state = next_state;
         }
+    }
+
+    fn parse_header1(&mut self, b: u8) -> Result<DecodeState, FrameParseResult> {
+        // 0   | 1 2 3 | 4 5 6 7
+        // Fin | Rsv   | Opcode
+        if b & 0b0111_0000 > 0 {
+            return Err(FrameParseResult::ProtoError);
+        }
+        self.ctx = DecodeContext {
+            is_fin: b & 0b1000_0000 > 0,
+            opcode: Opcode::try_from(b & 0b1111).map_err(|()| FrameParseResult::ProtoError)?,
+            payload_len: 0,
+            mask_key: None,
+            masked: false,
+        };
+        Ok(DecodeState::Header2)
+    }
+
+    fn parse_header2(&mut self) -> Result<DecodeState, FrameParseResult> {
+        // 0    | 1 2 3 4 5 6 7
+        // Mask | Payload len
+        let Some(b) = self.buf.pop_front() else {
+            return Err(FrameParseResult::Incomplete);
+        };
+
+        self.ctx.masked = (b & 0b1000_0000) > 0;
+        // Servers must NOT mask message
+        if self.role.is_server() != self.ctx.masked {
+            return Err(FrameParseResult::ProtoError);
+        }
+
+        self.ctx.payload_len = (b & 0b0111_1111) as usize;
+        // Validate control frame size
+        if self.ctx.opcode.is_control() && (!self.ctx.is_fin || self.ctx.payload_len > 125) {
+            return Err(FrameParseResult::ProtoError);
+        }
+
+        Ok(if self.ctx.payload_len > 125 {
+            DecodeState::ExtendedLen
+        } else if self.ctx.masked {
+            DecodeState::Mask
+        } else {
+            DecodeState::Payload
+        })
+    }
+
+    fn parse_extended_len(&mut self) -> Result<DecodeState, FrameParseResult> {
+        self.ctx.payload_len = if self.ctx.payload_len == 126 {
+            // 126 => 2 bytes extended (u16)
+            let len_bytes = pop_n(&mut self.buf).ok_or(FrameParseResult::Incomplete)?;
+            usize::from(u16::from_be_bytes(len_bytes))
+        } else {
+            // 127 => 8 bytes extended (u64)
+            let len_bytes = pop_n(&mut self.buf).ok_or(FrameParseResult::Incomplete)?;
+            usize::try_from(u64::from_be_bytes(len_bytes)).map_err(|_| FrameParseResult::SizeErr)?
+        };
+
+        Ok(if self.ctx.masked {
+            DecodeState::Mask
+        } else {
+            DecodeState::Payload
+        })
+    }
+
+    fn parse_payload(&mut self) -> Result<Vec<u8>, FrameParseResult> {
+        if self.buf.len() < self.ctx.payload_len {
+            return Err(FrameParseResult::Incomplete);
+        }
+
+        if self.current_msg_len + self.ctx.payload_len > MAX_MESSAGE_SIZE {
+            return Err(FrameParseResult::SizeErr);
+        }
+        self.current_msg_len += self.ctx.payload_len;
+
+        let mut payload: Vec<u8> = self.buf.drain(..self.ctx.payload_len).collect();
+        if let Some(mask) = self.ctx.mask_key {
+            payload.iter_mut().enumerate().for_each(|(i, b)| {
+                *b ^= mask[i % 4];
+            });
+        }
+
+        Ok(payload)
     }
 }
 
