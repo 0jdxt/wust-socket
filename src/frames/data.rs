@@ -1,5 +1,5 @@
 use super::Opcode;
-use crate::{MAX_FRAME_PAYLOAD, role::Role};
+use crate::{role::Role, MAX_FRAME_PAYLOAD, MAX_MESSAGE_SIZE};
 
 // -- SLOW PATH --
 // DataFrames may be fragmented or very large hence they need extra processing compared to
@@ -22,12 +22,11 @@ impl<'a> DataFrame<'a> {
     pub(crate) fn encode(self) -> Vec<Vec<u8>> {
         let mut payload = self.payload;
         let mut first = true;
-        let mut chunks = vec![];
+        let mut chunks = Vec::with_capacity(MAX_MESSAGE_SIZE.div_ceil(MAX_FRAME_PAYLOAD));
 
         while !payload.is_empty() {
-            let mut buf = vec![];
-
             let chunk_len = payload.len().min(MAX_FRAME_PAYLOAD);
+            let mut buf = Vec::with_capacity(chunk_len + 14);
 
             // Set OPCODE and FIN
             let opcode = if first { self.opcode } else { Opcode::Cont };
@@ -35,24 +34,20 @@ impl<'a> DataFrame<'a> {
             buf.push(if is_fin { 0x80 } else { 0 } | opcode as u8);
 
             // push LEN
-            // print!("encoding: {opcode:?} ({chunk_len:>3})");
+            #[allow(clippy::cast_possible_truncation)]
             match chunk_len {
                 0..=125 => {
-                    // print!("  u8 ");
-                    buf.push(u8::try_from(chunk_len).unwrap());
+                    buf.push(chunk_len as u8);
                 }
                 126..=65535 => {
-                    // print!(" u16 ");
                     buf.push(126);
-                    buf.extend_from_slice(&u16::try_from(chunk_len).unwrap().to_be_bytes());
+                    buf.extend_from_slice(&(chunk_len as u16).to_be_bytes());
                 }
                 _ => {
-                    // print!(" u64 ");
                     buf.push(127);
-                    buf.extend_from_slice(&u64::try_from(chunk_len).unwrap().to_be_bytes());
+                    buf.extend_from_slice(&(chunk_len as u64).to_be_bytes());
                 }
             }
-            // println!("{buf:?}");
 
             let chunk = &payload[..chunk_len];
 
