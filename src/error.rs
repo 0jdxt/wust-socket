@@ -1,6 +1,7 @@
 /// Close reason codes as specified in
 /// [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html#section-7.4)
 #[repr(u16)]
+#[derive(Debug)]
 pub enum CloseReason {
     /// Normal close
     Normal = 1000,

@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Error, ErrorKind, Read, Result, Write},
-    net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs},
+    net::{SocketAddr, TcpStream, ToSocketAddrs},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -14,6 +14,7 @@ use std::{
 use base64::engine::{Engine, general_purpose::STANDARD as BASE64};
 
 use crate::{
+    MAX_MESSAGE_SIZE,
     error::CloseReason,
     event::Event,
     frames::{ControlFrame, DataFrame, Frame, FrameDecoder, FrameParseResult, Opcode},
@@ -61,8 +62,7 @@ impl WebSocket {
         if self.inner.closing.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
-        let payload: [u8; 2] = CloseReason::Normal.into();
-        self.inner.close(&payload)
+        self.inner.close(CloseReason::Normal, "")
     }
 
     /// Sends a ping to the server.
@@ -86,7 +86,7 @@ impl WebSocket {
         self.inner.send(text.as_bytes(), Opcode::Text)
     }
 
-    pub fn send_bytes(&mut self, bytes: &[u8]) -> Result<()> { self.inner.send(bytes, Opcode::Bin) }
+    pub fn send_bytes(&self, bytes: &[u8]) -> Result<()> { self.inner.send(bytes, Opcode::Bin) }
 
     /// Start a ping loop in a background thread
     fn start_ping_loop(&self, interval_secs: u64, event_tx: Sender<Event>) {
@@ -119,7 +119,14 @@ impl WebSocket {
             loop {
                 let n = {
                     match inner.reader.lock().unwrap().read(&mut buf) {
-                        Ok(0) | Err(_) => break, // connection closed or error
+                        Ok(0) => {
+                            println!("TCP FIN");
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("Err: {e}");
+                            break;
+                        }
                         Ok(n) => n,
                     }
                 };
@@ -129,7 +136,10 @@ impl WebSocket {
                     match result {
                         FrameParseResult::Complete(frame) => {
                             if handle_frame(frame, &inner, &mut partial_msg, &event_tx).is_none() {
-                                return;
+                                // finished processing frames for now
+                                // if the connection is closing, just read and discard until FIN
+                                inner.closing.store(true, Ordering::Release);
+                                break;
                             }
                         }
                         FrameParseResult::Incomplete => {
@@ -138,19 +148,23 @@ impl WebSocket {
                         }
                         FrameParseResult::ProtoError => {
                             // close connection with ProtoError
-                            let payload: [u8; 2] = CloseReason::ProtoError.into();
-                            let _ = inner.close(&payload);
-                            return;
+                            let _ = inner.close(
+                                CloseReason::ProtoError,
+                                "There was a ws protocol violation.",
+                            );
+                            break;
                         }
                         FrameParseResult::SizeErr => {
                             // close connection with TooBig
-                            let payload: [u8; 2] = CloseReason::TooBig.into();
-                            let _ = inner.close(&payload);
-                            return;
+                            let _ = inner.close(CloseReason::TooBig, "Frame exceeded maximum size");
+                            break;
                         }
                     }
                 }
             }
+            inner.closing.store(true, Ordering::Release);
+            inner.closed.store(true, Ordering::Release);
+            let _ = event_tx.send(Event::Closed);
         });
     }
 }
@@ -202,11 +216,15 @@ fn handle_frame(
                     // if we get a CONT before TEXT or BINARY
                     // or we get TEXT/BINARY without finishing the last message
                     // close the connection
-                    let payload: [u8; 2] = CloseReason::ProtoError.into();
-                    let _ = inner.close(&payload);
+                    let _ = inner.close(CloseReason::ProtoError, "Unexpected frame");
                     return None;
                 }
             };
+
+            if partial.len() + frame.payload.len() > MAX_MESSAGE_SIZE {
+                let _ = inner.close(CloseReason::TooBig, "Message exceeded maximum size");
+                return None;
+            }
 
             partial.push_bytes(&frame.payload);
 
@@ -218,8 +236,7 @@ fn handle_frame(
                         if let Ok(s) = String::from_utf8(buf) {
                             Message::Text(s)
                         } else {
-                            let payload: [u8; 2] = CloseReason::DataError.into();
-                            let _ = inner.close(&payload);
+                            let _ = inner.close(CloseReason::DataError, "Invalid UTF-8");
                             return None;
                         }
                     }
@@ -229,20 +246,15 @@ fn handle_frame(
         }
         // If closing, shutdown; otherwise, reply with close frame
         Opcode::Close => {
+            println!("got close! {frame:?}");
             // if not already closing try to send close frame, log err
             if !inner.closing.swap(true, Ordering::AcqRel)
-                && let Err(e) = inner.close(&frame.payload)
+                && let Err(e) = inner.close_raw(&frame.payload)
             {
                 eprintln!("ERR: error sending close: {e}");
                 let _ = event_tx.send(Event::Error(e));
             }
 
-            // request TCP shutdown if still open, ignore errors
-            let mut stream = inner.writer.lock().unwrap();
-            let _ = stream.flush();
-            let _ = stream.shutdown(Shutdown::Both);
-            inner.closed.store(true, Ordering::Release);
-            let _ = event_tx.send(Event::Closed);
             return None;
         }
     }
@@ -266,9 +278,18 @@ impl Inner {
     }
 
     // send close request
-    fn close(&self, payload: &[u8]) -> Result<()> {
+    fn close_raw(&self, payload: &[u8]) -> Result<()> {
         let frame = ControlFrame::close(payload, self.role);
         self.write_chunks(std::iter::once(frame.encode()))
+    }
+
+    fn close(&self, reason: CloseReason, text: &'static str) -> Result<()> {
+        println!("sending close: {reason:?} {text}");
+        let code: [u8; 2] = reason.into();
+        let mut payload = Vec::with_capacity(2 + text.len());
+        payload.extend_from_slice(&code);
+        payload.extend_from_slice(text.as_bytes());
+        self.close_raw(&payload)
     }
 
     // send ping with a timestamp

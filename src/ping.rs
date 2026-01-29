@@ -28,10 +28,6 @@ impl<const N: usize> PingStats<N> {
                 count += 1;
             }
         }
-        if count > 0 {
-            Some(sum / count)
-        } else {
-            None
-        }
+        if count > 0 { Some(sum / count) } else { None }
     }
 }

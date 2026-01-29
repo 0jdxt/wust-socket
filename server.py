@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-
 import asyncio
 from websockets.asyncio.server import serve
 

@@ -34,7 +34,7 @@ fn handshake_and_close() {
             }
 
             // compute Sec-WebSocket-Accept
-            use base64::engine::{general_purpose::STANDARD as BASE64, Engine};
+            use base64::engine::{Engine, general_purpose::STANDARD as BASE64};
             use sha1::{Digest, Sha1};
 
             let client_key = headers.get("Sec-WebSocket-Key").unwrap();

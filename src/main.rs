@@ -1,5 +1,4 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
+#![allow(dead_code, unused)]
 use std::{
     fs::File,
     io::{Read, Result},
@@ -13,8 +12,12 @@ fn main() -> Result<()> {
     let server = "127.0.0.1:8765";
     let mut ws = WebSocket::connect(server)?;
 
-    // ws.send_text("\n")?;
-    // ws.send_text(LOREM)?;
+    ws.send_text("\n")?;
+    ws.send_text(LOREM)?;
+
+    println!("{:?}", ws.recv());
+    println!("{:?}", ws.recv());
+    println!("{:?}", ws.recv());
 
     // for i in 0..5 {
     //     let msg = format!("hello from wust_socket {i}!");
@@ -24,16 +27,17 @@ fn main() -> Result<()> {
     //     }
     // }
 
-    let data = {
-        let mut s = String::new();
-        let mut f = File::open("/usr/share/cracklib/cracklib-small")?;
-        f.read_to_string(&mut s)?;
-        s
-    };
+    // let data = {
+    //     let mut s = String::new();
+    //     let mut f = File::open("/usr/share/cracklib/cracklib-small")?;
+    //     f.read_to_string(&mut s)?;
+    //     s
+    // };
 
-    ws.send_text(&data)?;
-    println!("{:?}", ws.recv());
-    println!("{:?}", ws.recv());
+    // for word in LOREM.split_ascii_whitespace() {
+    //     ws.send_text(word)?;
+    //     println!("{:?}", ws.recv());
+    // }
 
     // while let Some(e) = ws.recv_timeout(Duration::from_secs(2)) {
     //     match e {

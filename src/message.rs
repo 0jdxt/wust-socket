@@ -39,4 +39,10 @@ impl PartialMessage {
             Self::Text(buf) | Self::Binary(buf) => buf.extend_from_slice(bytes),
         }
     }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Text(buf) | Self::Binary(buf) => buf.len(),
+        }
+    }
 }
