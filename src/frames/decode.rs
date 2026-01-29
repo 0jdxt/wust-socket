@@ -3,6 +3,9 @@ use std::{array, collections::VecDeque};
 use super::{Frame, Opcode};
 use crate::{role::Role, MAX_FRAME_PAYLOAD};
 
+// helper type since decoder errors return FrameParseResult
+type Result<T> = std::result::Result<T, FrameParseResult>;
+
 #[derive(Debug)]
 pub(crate) enum FrameParseResult {
     Complete(Frame),
@@ -100,7 +103,7 @@ impl FrameDecoder {
         }
     }
 
-    fn parse_header1(&mut self, b: u8) -> Result<DecodeState, FrameParseResult> {
+    fn parse_header1(&mut self, b: u8) -> Result<DecodeState> {
         // 0   | 1 2 3 | 4 5 6 7
         // Fin | Rsv   | Opcode
         if b & 0b0111_0000 > 0 {
@@ -116,7 +119,7 @@ impl FrameDecoder {
         Ok(DecodeState::Header2)
     }
 
-    fn parse_header2(&mut self) -> Result<DecodeState, FrameParseResult> {
+    fn parse_header2(&mut self) -> Result<DecodeState> {
         // 0    | 1 2 3 4 5 6 7
         // Mask | Payload len
         let Some(b) = self.buf.pop_front() else {
@@ -144,7 +147,7 @@ impl FrameDecoder {
         })
     }
 
-    fn parse_extended_len(&mut self) -> Result<DecodeState, FrameParseResult> {
+    fn parse_extended_len(&mut self) -> Result<DecodeState> {
         self.ctx.payload_len = if self.ctx.payload_len == 126 {
             // 126 => 2 bytes extended (u16)
             let len_bytes = self.pop_n().ok_or(FrameParseResult::Incomplete)?;
@@ -162,7 +165,7 @@ impl FrameDecoder {
         })
     }
 
-    fn parse_payload(&mut self) -> Result<Vec<u8>, FrameParseResult> {
+    fn parse_payload(&mut self) -> Result<Vec<u8>> {
         if self.buf.len() < self.ctx.payload_len {
             return Err(FrameParseResult::Incomplete);
         }
