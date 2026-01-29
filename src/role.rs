@@ -1,8 +1,6 @@
 #[derive(Copy, Clone, Debug)]
-pub(crate) enum Role {
+pub enum Role {
     Client,
-    // TODO: server
-    #[allow(dead_code)]
     Server,
 }
 

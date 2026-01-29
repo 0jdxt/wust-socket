@@ -1,6 +1,6 @@
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq)]
-pub(crate) enum Opcode {
+pub enum Opcode {
     Cont = 0x0,
     Text = 0x1,
     Bin = 0x2,

@@ -250,6 +250,8 @@ mod tests {
 
     // Build a raw WebSocket frame from opcode and payload
     fn build_frame_bytes(opcode: Opcode, payload: &[u8], fin: bool, mask: bool) -> Vec<u8> {
+        #![allow(clippy::cast_possible_truncation)]
+
         let mut bytes = Vec::new();
         let mut b1 = opcode as u8 & 0x0F;
         if fin {
@@ -263,7 +265,7 @@ mod tests {
                 b2 |= 0x80;
             }
             bytes.push(b2);
-        } else if payload.len() <= u16::MAX as usize {
+        } else if u16::try_from(payload.len()).is_ok() {
             let mut b2 = 126;
             if mask {
                 b2 |= 0x80;
@@ -295,7 +297,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(1000))]
 
-        #[test]
+       #[test]
         fn decoder_handles_random_frames(
             opcode in opcode_strategy(),
             fin in any::<bool>(),

@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use wust_socket::WebSocket;
+use wust_socket::WebSocketClient;
 
 #[test]
 fn handshake_and_close() {
@@ -34,7 +34,7 @@ fn handshake_and_close() {
             }
 
             // compute Sec-WebSocket-Accept
-            use base64::engine::{Engine, general_purpose::STANDARD as BASE64};
+            use base64::engine::{general_purpose::STANDARD as BASE64, Engine};
             use sha1::{Digest, Sha1};
 
             let client_key = headers.get("Sec-WebSocket-Key").unwrap();
@@ -57,6 +57,6 @@ fn handshake_and_close() {
 
     // client side, just handshake and close cleanly
     thread::sleep(Duration::from_millis(50));
-    let mut ws = WebSocket::connect(server).unwrap();
+    let mut ws = WebSocketClient::connect(server).unwrap();
     ws.close().unwrap();
 }

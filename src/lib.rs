@@ -6,18 +6,22 @@
     clippy::missing_safety_doc
 )]
 
+mod client;
 mod error;
 mod event;
 mod frames;
+mod inner;
 mod message;
 mod ping;
 mod role;
-mod websocket;
+mod server;
+mod ws;
 
+pub use client::WebSocketClient;
 pub use error::CloseReason;
 pub use event::Event;
 pub use message::Message;
-pub use websocket::WebSocket;
+pub use server::WebSocketServer;
 
 pub(crate) const MAX_FRAME_PAYLOAD: usize = 16 * 1024;
 pub(crate) const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
