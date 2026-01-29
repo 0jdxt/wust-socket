@@ -1,6 +1,7 @@
 use std::{
-    io::Result,
-    sync::atomic::AtomicBool,
+    io::{Result, Write},
+    net::TcpStream,
+    sync::{atomic::AtomicBool, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -12,10 +13,10 @@ use crate::{
 
 pub trait InnerTrait {
     const ROLE: Role;
-    fn write_chunks(&self, chunks: impl IntoIterator<Item = Vec<u8>>) -> Result<()>;
-    // getters
     fn closing(&self) -> &AtomicBool;
     fn closed(&self) -> &AtomicBool;
+    fn writer(&self) -> &Mutex<TcpStream>;
+    fn role(&self) -> Role { Self::ROLE }
 
     // send data (bytes) over the websocket
     fn send(&self, bytes: &[u8], ty: Opcode) -> Result<()> {
@@ -48,5 +49,13 @@ pub trait InnerTrait {
 
         let frame = ControlFrame::ping(&timestamp, Self::ROLE);
         self.write_chunks(std::iter::once(frame.encode()))
+    }
+
+    fn write_chunks(&self, chunks: impl IntoIterator<Item = Vec<u8>>) -> Result<()> {
+        let mut ws = self.writer().lock().unwrap();
+        for chunk in chunks {
+            ws.write_all(&chunk)?;
+        }
+        ws.flush()
     }
 }

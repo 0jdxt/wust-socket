@@ -27,6 +27,24 @@ use crate::{
 
 pub type WebSocketClient = WebSocket<ClientInner>;
 
+pub struct ClientInner {
+    reader: Mutex<TcpStream>,
+    writer: Mutex<TcpStream>,
+    ping_stats: Mutex<PingStats<5>>,
+    closing: AtomicBool,
+    closed: AtomicBool,
+}
+
+impl InnerTrait for ClientInner {
+    const ROLE: Role = Role::Client;
+
+    fn closing(&self) -> &AtomicBool { &self.closing }
+
+    fn closed(&self) -> &AtomicBool { &self.closed }
+
+    fn writer(&self) -> &Mutex<TcpStream> { &self.writer }
+}
+
 impl WebSocketClient {
     pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self> {
         TcpStream::connect(addr)?.try_into()
@@ -34,10 +52,6 @@ impl WebSocketClient {
 
     pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> Result<Self> {
         TcpStream::connect_timeout(addr, timeout)?.try_into()
-    }
-
-    pub fn recv_timeout(&mut self, timeout: Duration) -> Option<Event> {
-        self.event_rx.recv_timeout(timeout).ok()
     }
 
     #[must_use]
@@ -69,7 +83,7 @@ impl WebSocketClient {
             let mut buf = [0u8; 2048];
             let mut partial_msg = None;
 
-            let mut fd = FrameDecoder::new(inner.role);
+            let mut fd = FrameDecoder::new(inner.role());
 
             loop {
                 let n = {
@@ -156,7 +170,7 @@ fn handle_frame(
         }
         // Reply with pong
         Opcode::Ping => {
-            let bytes = ControlFrame::pong(&frame.payload, inner.role).encode();
+            let bytes = ControlFrame::pong(&frame.payload, inner.role()).encode();
             let mut ws = inner.writer.lock().unwrap();
             let _ = ws.write_all(&bytes);
         }
@@ -216,42 +230,8 @@ fn handle_frame(
     Some(())
 }
 
-pub struct ClientInner {
-    reader: Mutex<TcpStream>,
-    writer: Mutex<TcpStream>,
-    ping_stats: Mutex<PingStats<5>>,
-    closing: AtomicBool,
-    closed: AtomicBool,
-    role: Role,
-}
-
-impl InnerTrait for ClientInner {
-    const ROLE: Role = Role::Client;
-
-    fn closing(&self) -> &AtomicBool { &self.closing }
-
-    fn closed(&self) -> &AtomicBool { &self.closed }
-
-    fn write_chunks(&self, chunks: impl IntoIterator<Item = Vec<u8>>) -> Result<()> {
-        let mut ws = self.writer.lock().unwrap();
-        for chunk in chunks {
-            ws.write_all(&chunk)?;
-        }
-        ws.flush()
-    }
-}
-
-/// Best-effort close if user forgets to call [`WebSocket::close`].
-impl<I: InnerTrait> Drop for WebSocket<I> {
-    fn drop(&mut self) {
-        if !self.inner.closing().load(Ordering::Acquire) {
-            let _ = self.close();
-        }
-    }
-}
-
 /// Takes a [`TcpStream`] and attempts to upgrade the connection to WS.
-impl TryFrom<TcpStream> for WebSocket<ClientInner> {
+impl TryFrom<TcpStream> for WebSocketClient {
     /// Returns [`std::io::Error`] if unable to read from or write to the [`TcpStream`], or if there was a handshake failure whilst upgrading the connection.
     type Error = Error;
 
@@ -352,7 +332,6 @@ impl TryFrom<TcpStream> for WebSocket<ClientInner> {
                 ping_stats: Mutex::new(PingStats::new()),
                 closing: AtomicBool::new(false),
                 closed: AtomicBool::new(false),
-                role: Role::Client,
             }),
             event_rx,
         };

@@ -1,7 +1,7 @@
 use crate::message::Message;
 
-/// `Event`s are produced by [`WebSocket::recv`](crate::WebSocket::recv)
-/// and [`WebSocket::recv_timeout`](crate::WebSocket::recv_timeout)
+/// `Event`s are produced by [`WebSocketClient::recv`](crate::WebSocketClient::recv)
+/// and [`WebSocketClient::recv_timeout`](crate::WebSocketClient::recv_timeout)
 #[derive(Debug)]
 pub enum Event {
     /// Pong event with its latency in milliseconds.
