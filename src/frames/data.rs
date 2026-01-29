@@ -1,7 +1,5 @@
 use super::Opcode;
-use crate::role::Role;
-
-const MAX_FRAME_PAYLOAD: usize = 16 * 1024;
+use crate::{MAX_FRAME_PAYLOAD, role::Role};
 
 // -- SLOW PATH --
 // DataFrames may be fragmented or very large hence they need extra processing compared to
