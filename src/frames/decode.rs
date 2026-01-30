@@ -185,9 +185,7 @@ impl<P: DecodePolicy> FrameDecoder<P> {
 
         // apply mask
         if P::EXPECT_MASKED {
-            payload.iter_mut().enumerate().for_each(|(i, b)| {
-                *b ^= self.ctx.mask_key[i % 4];
-            });
+            crate::mask::mask(&mut payload, self.ctx.mask_key);
         }
 
         Ok(payload)
@@ -419,5 +417,5 @@ mod bench {
     }
 
     // Benchmarks for different payloads
-    bench_frame!(125, 1024, 4096, 8192, 16384);
+    bench_frame!(125, 1024, 4096, 8192, 16384, 32768);
 }

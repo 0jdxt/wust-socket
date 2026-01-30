@@ -12,3 +12,6 @@ sha1 = "0.10.6"
 [dev-dependencies]
 paste = "1.0.15"
 proptest = "1.9.0"
+
+[features]
+simd_masking = []

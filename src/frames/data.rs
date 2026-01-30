@@ -61,10 +61,11 @@ impl<'a, P: EncodePolicy> DataFrame<'a, P> {
                 let mut mask_key = [0u8; 4];
                 rand::fill(&mut mask_key);
                 buf.extend_from_slice(&mask_key);
+
                 // mask bytes
-                for (i, &b) in chunk.iter().enumerate() {
-                    buf.push(b ^ mask_key[i % 4]);
-                }
+                let start = buf.len();
+                buf.extend_from_slice(chunk);
+                crate::mask::mask(&mut buf[start..], mask_key);
             } else {
                 buf.extend_from_slice(chunk);
             }
@@ -111,5 +112,5 @@ mod bench {
     };
 }
 
-    bench_data_sizes!(125, 1024, 4096, 16384);
+    bench_data_sizes!(125, 1024, 4096, 16384, 32768);
 }
