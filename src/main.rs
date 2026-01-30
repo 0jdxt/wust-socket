@@ -2,6 +2,8 @@
 use std::{
     fs::File,
     io::{Read, Result},
+    thread,
+    time::Duration,
 };
 
 use wust_socket::{Event, WebSocketClient, WebSocketServer};
@@ -52,6 +54,8 @@ fn main() -> Result<()> {
     // }
 
     ws.close()?;
+    // wait for close/tcp fin
+    thread::sleep(Duration::from_millis(50));
 
     let server = WebSocketServer::bind("127.0.0.1:0")?;
     println!("listening: {}", server.addr()?);

@@ -1,16 +1,17 @@
 use std::{
     io::{Error, Result},
+    marker::PhantomData,
     net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     sync::{atomic::AtomicBool, mpsc::channel, Arc, Mutex},
 };
 
-use crate::{inner::InnerTrait, role::Role, ws::WebSocket};
+use crate::{inner::InnerTrait, role::Server, ws::WebSocket};
 
 pub struct WebSocketServer {
     listener: TcpListener,
 }
 
-pub type ServerConn = WebSocket<ServerConnInner>;
+pub type ServerConn = WebSocket<ServerConnInner, Server>;
 
 pub struct ServerConnInner {
     reader: Mutex<TcpStream>,
@@ -19,9 +20,7 @@ pub struct ServerConnInner {
     closing: AtomicBool,
 }
 
-impl InnerTrait for ServerConnInner {
-    const ROLE: Role = Role::Server;
-
+impl InnerTrait<Server> for ServerConnInner {
     fn writer(&self) -> &Mutex<TcpStream> { &self.writer }
 
     fn closed(&self) -> &AtomicBool { &self.closed }
@@ -54,6 +53,7 @@ impl TryFrom<TcpStream> for ServerConn {
                 closing: AtomicBool::new(false),
             }),
             event_rx,
+            _p: PhantomData,
         })
     }
 }

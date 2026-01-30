@@ -1,39 +1,41 @@
+use std::marker::PhantomData;
+
 use super::Opcode;
-use crate::role::Role;
+use crate::role::EncodePolicy;
 
 // -- FAST PATH --
 // Separate ControlFrame struct to allow a fast path for sending single frames (Ping, Pong, Close) which
 // will have a payload <= 125 bytes and FIN always set.
-pub(crate) struct ControlFrame<'a> {
+pub(crate) struct ControlFrame<'a, P: EncodePolicy> {
     opcode: Opcode,
     payload: &'a [u8],
-    role: Role,
+    _p: PhantomData<P>,
 }
 
 // Functions to produce each kind of ControlFrame with payload,
 // and a send function to write to stream
-impl<'a> ControlFrame<'a> {
-    pub(crate) fn ping(payload: &'a [u8], role: Role) -> Self {
+impl<'a, P: EncodePolicy> ControlFrame<'a, P> {
+    pub(crate) fn ping(payload: &'a [u8]) -> Self {
         Self {
             opcode: Opcode::Ping,
             payload,
-            role,
+            _p: PhantomData,
         }
     }
 
-    pub(crate) fn pong(payload: &'a [u8], role: Role) -> Self {
+    pub(crate) fn pong(payload: &'a [u8]) -> Self {
         Self {
             opcode: Opcode::Pong,
             payload,
-            role,
+            _p: PhantomData,
         }
     }
 
-    pub(crate) fn close(payload: &'a [u8], role: Role) -> Self {
+    pub(crate) fn close(payload: &'a [u8]) -> Self {
         Self {
             opcode: Opcode::Close,
             payload,
-            role,
+            _p: PhantomData,
         }
     }
 
@@ -44,7 +46,7 @@ impl<'a> ControlFrame<'a> {
         buf[1] = u8::try_from(self.payload.len()).expect("ControlFrame payload too large") | 0x80;
 
         // Clients must SEND masked
-        if self.role.is_client() {
+        if P::MASK_OUTGOING {
             rand::fill(&mut buf[2..6]);
             for (i, b) in self.payload.iter().enumerate() {
                 buf[6 + i] = b ^ buf[2 + (i % 4)];

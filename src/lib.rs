@@ -21,7 +21,8 @@ pub use client::WebSocketClient;
 pub use error::CloseReason;
 pub use event::Event;
 pub use message::Message;
-pub use server::WebSocketServer;
+pub use server::{ServerConn, WebSocketServer};
+pub use ws::WebSocket;
 
 pub(crate) const MAX_FRAME_PAYLOAD: usize = 16 * 1024;
 pub(crate) const MAX_MESSAGE_SIZE: usize = 1024 * 1024;

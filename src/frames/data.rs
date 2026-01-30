@@ -1,21 +1,23 @@
+use std::marker::PhantomData;
+
 use super::Opcode;
-use crate::{role::Role, MAX_FRAME_PAYLOAD, MAX_MESSAGE_SIZE};
+use crate::{role::EncodePolicy, MAX_FRAME_PAYLOAD, MAX_MESSAGE_SIZE};
 
 // -- SLOW PATH --
 // DataFrames may be fragmented or very large hence they need extra processing compared to
 // ControlFrames
-pub(crate) struct DataFrame<'a> {
+pub(crate) struct DataFrame<'a, P: EncodePolicy> {
     opcode: Opcode,
     payload: &'a [u8],
-    role: Role,
+    _p: PhantomData<P>,
 }
 
-impl<'a> DataFrame<'a> {
-    pub(crate) fn new(payload: &'a [u8], opcode: Opcode, role: Role) -> Self {
+impl<'a, P: EncodePolicy> DataFrame<'a, P> {
+    pub(crate) fn new(payload: &'a [u8], opcode: Opcode) -> Self {
         Self {
             opcode,
             payload,
-            role,
+            _p: PhantomData,
         }
     }
 
@@ -52,7 +54,7 @@ impl<'a> DataFrame<'a> {
             let chunk = &payload[..chunk_len];
 
             // Clients must SEND masked
-            if self.role.is_client() {
+            if P::MASK_OUTGOING {
                 // set MASK bit
                 buf[1] |= 0x80;
                 // get random bytes and push to buf

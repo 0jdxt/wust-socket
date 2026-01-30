@@ -1,11 +1,25 @@
-#[derive(Copy, Clone, Debug)]
-pub enum Role {
-    Client,
-    Server,
+pub trait EncodePolicy {
+    const MASK_OUTGOING: bool;
 }
 
-impl Role {
-    pub(crate) fn is_client(self) -> bool { matches!(self, Role::Client) }
+pub trait DecodePolicy {
+    const EXPECT_MASKED: bool;
+}
 
-    pub(crate) fn is_server(self) -> bool { matches!(self, Role::Server) }
+#[derive(Copy, Clone, Debug)]
+pub struct Client;
+impl EncodePolicy for Client {
+    const MASK_OUTGOING: bool = true;
+}
+impl DecodePolicy for Client {
+    const EXPECT_MASKED: bool = false;
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct Server;
+impl DecodePolicy for Server {
+    const EXPECT_MASKED: bool = true;
+}
+impl EncodePolicy for Server {
+    const MASK_OUTGOING: bool = false;
 }

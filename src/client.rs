@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Error, ErrorKind, Read, Result, Write},
+    marker::PhantomData,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     sync::{
         Arc, Mutex,
@@ -21,11 +22,11 @@ use crate::{
     inner::InnerTrait,
     message::{Message, PartialMessage},
     ping::PingStats,
-    role::Role,
+    role::{Client, EncodePolicy},
     ws::WebSocket,
 };
 
-pub type WebSocketClient = WebSocket<ClientInner>;
+pub type WebSocketClient = WebSocket<ClientInner, Client>;
 
 pub struct ClientInner {
     reader: Mutex<TcpStream>,
@@ -35,9 +36,7 @@ pub struct ClientInner {
     closed: AtomicBool,
 }
 
-impl InnerTrait for ClientInner {
-    const ROLE: Role = Role::Client;
-
+impl InnerTrait<Client> for ClientInner {
     fn closing(&self) -> &AtomicBool { &self.closing }
 
     fn closed(&self) -> &AtomicBool { &self.closed }
@@ -46,7 +45,7 @@ impl InnerTrait for ClientInner {
 }
 
 impl WebSocketClient {
-    pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self> {
+    pub fn connect(addr: impl ToSocketAddrs) -> Result<Self> {
         TcpStream::connect(addr)?.try_into()
     }
 
@@ -83,7 +82,7 @@ impl WebSocketClient {
             let mut buf = [0u8; 2048];
             let mut partial_msg = None;
 
-            let mut fd = FrameDecoder::new(inner.role());
+            let mut fd = FrameDecoder::<Client>::new();
 
             loop {
                 let n = {
@@ -104,7 +103,9 @@ impl WebSocketClient {
                 while let Some(result) = fd.next_frame() {
                     match result {
                         FrameParseResult::Complete(frame) => {
-                            if handle_frame(frame, &inner, &mut partial_msg, &event_tx).is_none() {
+                            if handle_frame::<Client>(frame, &inner, &mut partial_msg, &event_tx)
+                                .is_none()
+                            {
                                 // finished processing frames for now
                                 // if the connection is closing, just read and discard until FIN
                                 inner.closing.store(true, Ordering::Release);
@@ -138,7 +139,7 @@ impl WebSocketClient {
     }
 }
 
-fn handle_frame(
+fn handle_frame<P: EncodePolicy>(
     frame: Frame,
     inner: &Arc<ClientInner>,
     partial_msg: &mut Option<PartialMessage>,
@@ -170,7 +171,7 @@ fn handle_frame(
         }
         // Reply with pong
         Opcode::Ping => {
-            let bytes = ControlFrame::pong(&frame.payload, inner.role()).encode();
+            let bytes = ControlFrame::<P>::pong(&frame.payload).encode();
             let mut ws = inner.writer.lock().unwrap();
             let _ = ws.write_all(&bytes);
         }
@@ -334,6 +335,7 @@ impl TryFrom<TcpStream> for WebSocketClient {
                 closed: AtomicBool::new(false),
             }),
             event_rx,
+            _p: PhantomData,
         };
         ws.start_recv_loop(event_tx.clone());
         ws.start_ping_loop(30, event_tx.clone());

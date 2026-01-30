@@ -1,7 +1,7 @@
-use std::{array, collections::VecDeque};
+use std::{array, collections::VecDeque, marker::PhantomData};
 
 use super::{Frame, Opcode};
-use crate::{role::Role, MAX_FRAME_PAYLOAD};
+use crate::{role::DecodePolicy, MAX_FRAME_PAYLOAD};
 
 // helper type since decoder errors return FrameParseResult
 type Result<T> = std::result::Result<T, FrameParseResult>;
@@ -14,11 +14,11 @@ pub(crate) enum FrameParseResult {
     SizeErr,
 }
 
-pub(crate) struct FrameDecoder {
+pub(crate) struct FrameDecoder<P: DecodePolicy> {
     buf: VecDeque<u8>,
     state: DecodeState,
     ctx: DecodeContext,
-    role: Role,
+    _p: PhantomData<P>,
 }
 
 #[derive(Debug)]
@@ -35,28 +35,27 @@ struct DecodeContext {
     is_fin: bool,
     opcode: Opcode,
     payload_len: usize,
-    mask_key: Option<[u8; 4]>,
-    masked: bool,
+    mask_key: [u8; 4],
 }
 
-impl FrameDecoder {
-    pub(crate) fn new(role: Role) -> Self {
+impl<P: DecodePolicy> FrameDecoder<P> {
+    pub(crate) fn new() -> Self {
         Self {
             buf: VecDeque::new(),
             state: DecodeState::Header1,
-            role,
             ctx: DecodeContext {
                 is_fin: false,
                 opcode: Opcode::Cont,
                 payload_len: 0,
-                mask_key: None,
-                masked: false,
+                mask_key: [0, 0, 0, 0],
             },
+            _p: PhantomData,
         }
     }
 
     pub(crate) fn push_bytes(&mut self, bytes: &[u8]) { self.buf.extend(bytes); }
 
+    #[inline(never)]
     pub(crate) fn next_frame(&mut self) -> Option<FrameParseResult> {
         loop {
             let next_state = match self.state {
@@ -81,7 +80,7 @@ impl FrameDecoder {
                     let Some(x) = self.pop_n() else {
                         return Some(FrameParseResult::Incomplete);
                     };
-                    self.ctx.mask_key = Some(x);
+                    self.ctx.mask_key = x;
                     DecodeState::Payload
                 }
                 DecodeState::Payload => {
@@ -113,8 +112,7 @@ impl FrameDecoder {
             is_fin: b & 0b1000_0000 > 0,
             opcode: Opcode::try_from(b & 0b1111).map_err(|()| FrameParseResult::ProtoError)?,
             payload_len: 0,
-            mask_key: None,
-            masked: false,
+            mask_key: [0, 0, 0, 0],
         };
         Ok(DecodeState::Header2)
     }
@@ -126,9 +124,9 @@ impl FrameDecoder {
             return Err(FrameParseResult::Incomplete);
         };
 
-        self.ctx.masked = (b & 0b1000_0000) > 0;
+        let masked = (b & 0b1000_0000) > 0;
         // Servers must NOT mask message
-        if self.role.is_server() != self.ctx.masked {
+        if P::EXPECT_MASKED != masked {
             return Err(FrameParseResult::ProtoError);
         }
 
@@ -140,7 +138,7 @@ impl FrameDecoder {
 
         Ok(if self.ctx.payload_len > 125 {
             DecodeState::ExtendedLen
-        } else if self.ctx.masked {
+        } else if P::EXPECT_MASKED {
             DecodeState::Mask
         } else {
             DecodeState::Payload
@@ -158,7 +156,7 @@ impl FrameDecoder {
             usize::try_from(u64::from_be_bytes(len_bytes)).map_err(|_| FrameParseResult::SizeErr)?
         };
 
-        Ok(if self.ctx.masked {
+        Ok(if P::EXPECT_MASKED {
             DecodeState::Mask
         } else {
             DecodeState::Payload
@@ -182,9 +180,9 @@ impl FrameDecoder {
             return Err(FrameParseResult::ProtoError);
         }
 
-        if let Some(mask) = self.ctx.mask_key {
+        if P::EXPECT_MASKED {
             payload.iter_mut().enumerate().for_each(|(i, b)| {
-                *b ^= mask[i % 4];
+                *b ^= self.ctx.mask_key[i % 4];
             });
         }
 
@@ -221,6 +219,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::role::Client;
 
     // Strategy to generate a valid opcode
     fn opcode_strategy() -> BoxedStrategy<Opcode> {
@@ -233,10 +232,6 @@ mod tests {
             Just(Opcode::Close),
         ]
         .boxed()
-    }
-
-    fn role_strategy() -> BoxedStrategy<Role> {
-        prop_oneof![Just(Role::Client), Just(Role::Server)].boxed()
     }
 
     // Strategy to generate a valid WebSocket payload
@@ -301,14 +296,13 @@ mod tests {
         fn decoder_handles_random_frames(
             opcode in opcode_strategy(),
             fin in any::<bool>(),
-            role in role_strategy(),
         ) {
 
-            let mask = role.is_client();
+            let mask = Client::EXPECT_MASKED;
             let payload = payload_strategy(opcode).new_tree(&mut TestRunner::default()).unwrap().current();
 
             let frame_bytes = build_frame_bytes(opcode, &payload, fin, mask);
-            let mut decoder = FrameDecoder::new(Role::Server);
+            let mut decoder = FrameDecoder::<Client>::new();
             decoder.push_bytes(&frame_bytes);
 
             match decoder.next_frame() {
@@ -326,7 +320,7 @@ mod tests {
 
         #[test]
         fn fuzz_decoder(buf in vec(any::<u8>(), 0..2048)) {
-            let mut fd = FrameDecoder::new(Role::Client);
+            let mut fd = FrameDecoder::<Client>::new();
             fd.push_bytes(&buf);
 
             while let Some(result) = fd.next_frame() {

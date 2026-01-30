@@ -7,26 +7,24 @@ use std::{
 
 use crate::{
     frames::{ControlFrame, DataFrame, Opcode},
-    role::Role,
+    role::EncodePolicy,
     CloseReason,
 };
 
-pub trait InnerTrait {
-    const ROLE: Role;
+pub trait InnerTrait<P: EncodePolicy> {
     fn closing(&self) -> &AtomicBool;
     fn closed(&self) -> &AtomicBool;
     fn writer(&self) -> &Mutex<TcpStream>;
-    fn role(&self) -> Role { Self::ROLE }
 
     // send data (bytes) over the websocket
     fn send(&self, bytes: &[u8], ty: Opcode) -> Result<()> {
-        let frame = DataFrame::new(bytes, ty, Self::ROLE);
+        let frame = DataFrame::<P>::new(bytes, ty);
         self.write_chunks(frame.encode())
     }
 
     // send close request
     fn close_raw(&self, payload: &[u8]) -> Result<()> {
-        let frame = ControlFrame::close(payload, Self::ROLE);
+        let frame = ControlFrame::<P>::close(payload);
         self.write_chunks(std::iter::once(frame.encode()))
     }
 
@@ -47,7 +45,7 @@ pub trait InnerTrait {
             .as_millis()
             .to_be_bytes();
 
-        let frame = ControlFrame::ping(&timestamp, Self::ROLE);
+        let frame = ControlFrame::<P>::ping(&timestamp);
         self.write_chunks(std::iter::once(frame.encode()))
     }
 
