@@ -178,6 +178,9 @@ fn handle_frame<P: EncodePolicy>(
         // Build message out of frames
         Opcode::Text | Opcode::Bin | Opcode::Cont => {
             // println!("{frame:?}");
+            // TODO: Leniency
+            // allow overwriting partial messages
+            // if we get a new TEXT or BINARY
             let partial = match (partial_msg.as_mut(), frame.opcode) {
                 (None, Opcode::Text) => partial_msg.insert(PartialMessage::Text(vec![])),
                 (None, Opcode::Bin) => partial_msg.insert(PartialMessage::Binary(vec![])),

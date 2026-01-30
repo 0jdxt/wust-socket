@@ -55,8 +55,8 @@ impl<P: DecodePolicy> FrameDecoder<P> {
 
     pub(crate) fn push_bytes(&mut self, bytes: &[u8]) { self.buf.extend(bytes); }
 
-    #[inline(never)]
     pub(crate) fn next_frame(&mut self) -> Option<FrameParseResult> {
+        // println!("{}", self.buf.len());
         loop {
             let next_state = match self.state {
                 DecodeState::Header1 => {
@@ -105,11 +105,14 @@ impl<P: DecodePolicy> FrameDecoder<P> {
     fn parse_header1(&mut self, b: u8) -> Result<DecodeState> {
         // 0   | 1 2 3 | 4 5 6 7
         // Fin | Rsv   | Opcode
-        if b & 0b0111_0000 > 0 {
-            return Err(FrameParseResult::ProtoError);
-        }
         self.ctx = DecodeContext {
-            is_fin: b & 0b1000_0000 > 0,
+            // extract FIN and RSV at the same time since any case
+            // where the masked value isnt 10000000 or 0, RSV is violated
+            is_fin: match b & 0b1111_0000 {
+                0b1000_0000 => true,
+                0b0000_0000 => false,
+                _ => return Err(FrameParseResult::ProtoError),
+            },
             opcode: Opcode::try_from(b & 0b1111).map_err(|()| FrameParseResult::ProtoError)?,
             payload_len: 0,
             mask_key: [0, 0, 0, 0],
@@ -180,6 +183,7 @@ impl<P: DecodePolicy> FrameDecoder<P> {
             return Err(FrameParseResult::ProtoError);
         }
 
+        // apply mask
         if P::EXPECT_MASKED {
             payload.iter_mut().enumerate().for_each(|(i, b)| {
                 *b ^= self.ctx.mask_key[i % 4];
@@ -330,4 +334,89 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod bench {
+    extern crate test;
+
+    use test::{black_box, Bencher};
+
+    use super::*;
+    use crate::role::{Client, DecodePolicy, Server};
+
+    fn make_test_frame<T: DecodePolicy>(payload_len: usize) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(2 + payload_len);
+        let fin_rsv_opcode = 0b1000_0000; // FIN set, RSV=0, opcode=0 (continuation)
+        frame.push(fin_rsv_opcode);
+
+        if payload_len <= 125 {
+            let mut second = payload_len as u8;
+            if T::EXPECT_MASKED {
+                second |= 0b1000_0000;
+            }
+            frame.push(second);
+        } else if payload_len <= 65535 {
+            let mut second = 126;
+            if T::EXPECT_MASKED {
+                second |= 0b1000_0000;
+            }
+            frame.push(second);
+            frame.extend_from_slice(&(payload_len as u16).to_be_bytes());
+        } else {
+            let mut second = 127;
+            if T::EXPECT_MASKED {
+                second |= 0b1000_0000;
+            }
+            frame.push(second);
+            frame.extend_from_slice(&(payload_len as u64).to_be_bytes());
+        }
+
+        if T::EXPECT_MASKED {
+            let mask_key = [1, 2, 3, 4];
+            frame.extend_from_slice(&mask_key); // mask key
+            for i in 0..payload_len {
+                frame.push((i as u8) ^ mask_key[i % 4]); // simple masked payload
+            }
+        } else {
+            frame.extend((0..payload_len).map(|i| i as u8));
+        }
+        frame
+    }
+
+    fn bench_decode_frame<T>(b: &mut Bencher, payload_len: usize)
+    where
+        T: DecodePolicy,
+    {
+        let frame = make_test_frame::<T>(payload_len);
+        let mut decoder = FrameDecoder::<T>::new();
+        b.iter(|| {
+            decoder.push_bytes(black_box(&frame));
+            while let Some(result) = decoder.next_frame() {
+                if let FrameParseResult::Complete(payload) = result {
+                    black_box(payload);
+                    break;
+                }
+            }
+        });
+    }
+
+    use paste::paste;
+
+    macro_rules! bench_frame {
+        ($($payload:expr),* $(,)?) => {$(paste!{
+            #[bench]
+            fn [<bench_client_$payload>](b: &mut Bencher) {
+                bench_decode_frame::<Client>(b, $payload);
+            }
+
+            #[bench]
+            fn [<bench_server_$payload>](b: &mut Bencher) {
+                bench_decode_frame::<Server>(b, $payload);
+            }
+        })*};
+    }
+
+    // Benchmarks for different payloads
+    bench_frame!(125, 1024, 4096, 8192, 16384);
 }
