@@ -404,17 +404,18 @@ mod bench {
     use paste::paste;
 
     macro_rules! bench_frame {
-        ($($payload:expr),* $(,)?) => {$(paste!{
+    ($($len:expr),* $(,)?) => {
+        $(paste! {
             #[bench]
-            fn [<bench_client_$payload>](b: &mut Bencher) {
-                bench_decode_frame::<Client>(b, $payload);
+            fn [<bench_client_$len>](b: &mut Bencher) {
+                bench_decode_frame::<Client>(b, $len);
             }
-
             #[bench]
-            fn [<bench_server_$payload>](b: &mut Bencher) {
-                bench_decode_frame::<Server>(b, $payload);
+            fn [<bench_server_$len>](b: &mut Bencher) {
+                bench_decode_frame::<Server>(b, $len);
             }
-        })*};
+        })*
+    }
     }
 
     // Benchmarks for different payloads

@@ -77,3 +77,39 @@ impl<'a, P: EncodePolicy> DataFrame<'a, P> {
         chunks
     }
 }
+
+#[cfg(test)]
+mod bench {
+    extern crate test;
+    use paste::paste;
+    use test::{black_box, Bencher};
+
+    use super::*;
+    use crate::role::*;
+
+    fn make_payload(len: usize) -> Vec<u8> { (0..len).map(|i| i as u8).collect() }
+
+    fn bench_data_frame<P: EncodePolicy>(b: &mut Bencher, payload_len: usize) {
+        let payload = make_payload(payload_len);
+        b.iter(|| {
+            let frame = DataFrame::<P>::new(&payload, Opcode::Text);
+            let chunks = black_box(frame.encode());
+            black_box(chunks.len()); // consume so compiler can't optimize away
+        });
+    }
+
+    macro_rules! bench_data_sizes {
+    ($($len:expr),* $(,)?) => {
+        $(paste!{
+            #[bench] fn [<bench_client_ $len>](b: &mut Bencher) {
+                bench_data_frame::<Client>(b, $len);
+            }
+            #[bench] fn [<bench_server_ $len>](b: &mut Bencher) {
+                bench_data_frame::<Server>(b, $len);
+            }
+        })*
+    };
+}
+
+    bench_data_sizes!(125, 1024, 4096, 16384);
+}
