@@ -1,31 +1,28 @@
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Error, ErrorKind, Read, Result, Write},
+    io::{BufRead, BufReader, Write},
     marker::PhantomData,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{Sender, channel},
+        mpsc::{channel, Sender},
+        Arc, Mutex,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
-use base64::engine::{Engine, general_purpose::STANDARD as BASE64};
+use base64::engine::{general_purpose::STANDARD as BASE64, Engine};
 
 use crate::{
-    MAX_MESSAGE_SIZE,
-    error::CloseReason,
     event::Event,
-    frames::{ControlFrame, Frame, FrameDecoder, FrameParseResult, Opcode},
     inner::InnerTrait,
-    message::{Message, PartialMessage},
     ping::PingStats,
-    role::{Client, EncodePolicy},
-    ws::WebSocket,
+    role::Client,
+    ws::{Handler, WebSocket},
 };
 
+type Result<T> = std::result::Result<T, UpgradeError>;
 pub type WebSocketClient = WebSocket<ClientInner, Client>;
 
 pub struct ClientInner {
@@ -42,15 +39,23 @@ impl InnerTrait<Client> for ClientInner {
     fn closed(&self) -> &AtomicBool { &self.closed }
 
     fn writer(&self) -> &Mutex<TcpStream> { &self.writer }
+
+    fn reader(&self) -> &Mutex<TcpStream> { &self.reader }
+
+    fn ping_stats(&self) -> &Mutex<PingStats<5>> { &self.ping_stats }
 }
 
 impl WebSocketClient {
     pub fn connect(addr: impl ToSocketAddrs) -> Result<Self> {
-        TcpStream::connect(addr)?.try_into()
+        TcpStream::connect(addr)
+            .map_err(|_| UpgradeError::Connect)?
+            .try_into()
     }
 
     pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> Result<Self> {
-        TcpStream::connect_timeout(addr, timeout)?.try_into()
+        TcpStream::connect_timeout(addr, timeout)
+            .map_err(|_| UpgradeError::Connect)?
+            .try_into()
     }
 
     #[must_use]
@@ -60,184 +65,43 @@ impl WebSocketClient {
     fn start_ping_loop(&self, interval_secs: u64, event_tx: Sender<Event>) {
         let inner = self.inner.clone();
         let interval = Duration::from_secs(interval_secs);
-        thread::spawn(move || {
-            loop {
-                if inner.closing.load(Ordering::Acquire) {
-                    println!("INFO: socket closing, stopping ping loop");
-                    break;
-                }
-                if let Err(e) = inner.ping() {
-                    eprintln!("ERR: Ping failed, stopping ping loop.");
-                    let _ = event_tx.send(Event::Error(e));
-                    break;
-                }
-                thread::sleep(interval);
+        thread::spawn(move || loop {
+            if inner.closing.load(Ordering::Acquire) {
+                tracing::info!("socket closing, stopping ping loop");
+                break;
             }
+            if let Err(e) = inner.ping() {
+                tracing::warn!("Ping failed, stopping ping loop.");
+                let _ = event_tx.send(Event::Error(e));
+                break;
+            }
+            thread::sleep(interval);
         });
     }
 
     fn start_recv_loop(&self, event_tx: Sender<Event>) {
-        let inner = Arc::clone(&self.inner);
-        thread::spawn(move || {
-            let mut buf = [0u8; 2048];
-            let mut partial_msg = None;
-
-            let mut fd = FrameDecoder::<Client>::new();
-
-            loop {
-                let n = {
-                    match inner.reader.lock().unwrap().read(&mut buf) {
-                        Ok(0) => {
-                            println!("TCP FIN");
-                            break;
-                        }
-                        Err(e) => {
-                            eprintln!("Err: {e}");
-                            break;
-                        }
-                        Ok(n) => n,
-                    }
-                };
-
-                fd.push_bytes(&buf[..n]);
-                while let Some(result) = fd.next_frame() {
-                    match result {
-                        FrameParseResult::Complete(frame) => {
-                            if handle_frame::<Client>(frame, &inner, &mut partial_msg, &event_tx)
-                                .is_none()
-                            {
-                                // finished processing frames for now
-                                // if the connection is closing, just read and discard until FIN
-                                inner.closing.store(true, Ordering::Release);
-                                break;
-                            }
-                        }
-                        FrameParseResult::Incomplete => {
-                            // break while to read more bytes
-                            break;
-                        }
-                        FrameParseResult::ProtoError => {
-                            // close connection with ProtoError
-                            let _ = inner.close(
-                                CloseReason::ProtoError,
-                                "There was a ws protocol violation.",
-                            );
-                            break;
-                        }
-                        FrameParseResult::SizeErr => {
-                            // close connection with TooBig
-                            let _ = inner.close(CloseReason::TooBig, "Frame exceeded maximum size");
-                            break;
-                        }
-                    }
-                }
-            }
-            inner.closing.store(true, Ordering::Release);
-            inner.closed.store(true, Ordering::Release);
-            let _ = event_tx.send(Event::Closed);
-        });
+        self.recv_loop(event_tx, Handler::<Client>::new());
     }
 }
 
-fn handle_frame<P: EncodePolicy>(
-    frame: Frame,
-    inner: &Arc<ClientInner>,
-    partial_msg: &mut Option<PartialMessage>,
-    event_tx: &Sender<Event>,
-) -> Option<()> {
-    match frame.opcode {
-        // If unsolicited, ignore; otherwise, parse timestamp and calculate latency
-        Opcode::Pong => {
-            // try to parse payload as timestamp,
-            // otherwise its unsolicited and we ignore
-            if let Ok(bytes) = frame.payload.try_into() {
-                let sent = u128::from_be_bytes(bytes);
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis();
-
-                // assume anomalous if latency > u64::MAX
-                if let Ok(latency) = u64::try_from(now - sent) {
-                    inner
-                        .ping_stats
-                        .lock()
-                        .unwrap()
-                        .add(Duration::from_millis(latency));
-
-                    let _ = event_tx.send(Event::Pong(latency));
-                }
-            }
-        }
-        // Reply with pong
-        Opcode::Ping => {
-            let bytes = ControlFrame::<P>::pong(&frame.payload).encode();
-            let mut ws = inner.writer.lock().unwrap();
-            let _ = ws.write_all(&bytes);
-        }
-        // Build message out of frames
-        Opcode::Text | Opcode::Bin | Opcode::Cont => {
-            // println!("{frame:?}");
-            // TODO: Leniency
-            // allow overwriting partial messages
-            // if we get a new TEXT or BINARY
-            let partial = match (partial_msg.as_mut(), frame.opcode) {
-                (None, Opcode::Text) => partial_msg.insert(PartialMessage::Text(vec![])),
-                (None, Opcode::Bin) => partial_msg.insert(PartialMessage::Binary(vec![])),
-                (Some(p), Opcode::Cont) => p,
-                _ => {
-                    // if we get a CONT before TEXT or BINARY
-                    // or we get TEXT/BINARY without finishing the last message
-                    // close the connection
-                    let _ = inner.close(CloseReason::ProtoError, "Unexpected frame");
-                    return None;
-                }
-            };
-
-            if partial.len() + frame.payload.len() > MAX_MESSAGE_SIZE {
-                let _ = inner.close(CloseReason::TooBig, "Message exceeded maximum size");
-                return None;
-            }
-
-            partial.push_bytes(&frame.payload);
-
-            if frame.is_fin {
-                let msg = match partial_msg.take().unwrap() {
-                    PartialMessage::Binary(buf) => Message::Binary(buf),
-                    PartialMessage::Text(buf) => {
-                        // if invalid UTF-8 immediately close connection
-                        if let Ok(s) = String::from_utf8(buf) {
-                            Message::Text(s)
-                        } else {
-                            let _ = inner.close(CloseReason::DataError, "Invalid UTF-8");
-                            return None;
-                        }
-                    }
-                };
-                let _ = event_tx.send(Event::Message(msg));
-            }
-        }
-        // If closing, shutdown; otherwise, reply with close frame
-        Opcode::Close => {
-            println!("got close! {frame:?}");
-            // if not already closing try to send close frame, log err
-            if !inner.closing.swap(true, Ordering::AcqRel)
-                && let Err(e) = inner.close_raw(&frame.payload)
-            {
-                eprintln!("ERR: error sending close: {e}");
-                let _ = event_tx.send(Event::Error(e));
-            }
-
-            return None;
-        }
-    }
-    Some(())
+#[derive(Debug)]
+pub enum UpgradeError {
+    Read,
+    Write,
+    StatusLine(String),
+    Header {
+        field: &'static str,
+        expected: String,
+        got: Option<String>,
+    },
+    Addr,
+    Connect,
 }
 
 /// Takes a [`TcpStream`] and attempts to upgrade the connection to WS.
 impl TryFrom<TcpStream> for WebSocketClient {
     /// Returns [`std::io::Error`] if unable to read from or write to the [`TcpStream`], or if there was a handshake failure whilst upgrading the connection.
-    type Error = Error;
+    type Error = UpgradeError;
 
     fn try_from(mut stream: TcpStream) -> std::result::Result<Self, Self::Error> {
         let sec_websocket_key = {
@@ -253,29 +117,32 @@ impl TryFrom<TcpStream> for WebSocketClient {
             Connection: Upgrade\r\n\
             Sec-WebSocket-Key: {sec_websocket_key}\r\n\
             Sec-WebSocket-Version: 13\r\n\r\n",
-            stream.peer_addr()?
+            stream.peer_addr().map_err(|_| UpgradeError::Addr)?
         );
         // send upgrade request
-        stream.write_all(req.as_bytes())?;
+        stream
+            .write_all(req.as_bytes())
+            .map_err(|_| UpgradeError::Write)?;
 
         // get status line and validate status code
         let mut reader = BufReader::new(stream);
         let mut status_line = String::new();
-        reader.read_line(&mut status_line)?;
+        reader
+            .read_line(&mut status_line)
+            .map_err(|_| UpgradeError::Read)?;
 
         let mut status_parts = status_line.split_whitespace();
         if status_parts.next().is_none() || status_parts.next() != Some("101") {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("Handshake failed: invalid status from server: {status_line}"),
-            ));
+            return Err(UpgradeError::StatusLine(status_line));
         }
 
         // collect headers in a hashmap
         let mut headers = HashMap::new();
         loop {
             let mut line = String::new();
-            reader.read_line(&mut line)?;
+            reader
+                .read_line(&mut line)
+                .map_err(|_| UpgradeError::Read)?;
             let line = line.trim_end(); // remove \r\n
             if line.is_empty() {
                 break;
@@ -286,27 +153,8 @@ impl TryFrom<TcpStream> for WebSocketClient {
             }
         }
 
-        // validate Upgrade: websocket
-        match headers.get("Upgrade").map(|v| v.to_lowercase()) {
-            Some(x) if x == "websocket" => {}
-            r => {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    format!("Handshake failed: missing Upgrade header: {r:?}"),
-                ));
-            }
-        }
-
-        // validate Connection: upgrade
-        match headers.get("Connection").map(|v| v.to_lowercase()) {
-            Some(x) if x == "upgrade" => {}
-            r => {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    format!("Handshake failed: missing Connection header: {r:?}"),
-                ));
-            }
-        }
+        validate_header(&headers, "Upgrade", "websocket")?;
+        validate_header(&headers, "Connection", "upgrade")?;
 
         // validate key was processed properly
         let expected_accept = {
@@ -320,10 +168,11 @@ impl TryFrom<TcpStream> for WebSocketClient {
         match headers.get("Sec-WebSocket-Accept") {
             Some(x) if x == &expected_accept => {}
             r => {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    format!("Handshake failed: Sec-WebSocket-Accept mismatch: {r:?}",),
-                ));
+                return Err(UpgradeError::Header {
+                    field: "Sec-WebSocket-Accept",
+                    expected: expected_accept,
+                    got: r.cloned(),
+                });
             }
         }
 
@@ -331,7 +180,7 @@ impl TryFrom<TcpStream> for WebSocketClient {
         let stream = reader.into_inner();
         let ws = WebSocket {
             inner: Arc::new(ClientInner {
-                reader: Mutex::new(stream.try_clone()?),
+                reader: Mutex::new(stream.try_clone().map_err(|_| UpgradeError::Read)?),
                 writer: Mutex::new(stream),
                 ping_stats: Mutex::new(PingStats::new()),
                 closing: AtomicBool::new(false),
@@ -344,4 +193,22 @@ impl TryFrom<TcpStream> for WebSocketClient {
         ws.start_ping_loop(30, event_tx.clone());
         Ok(ws)
     }
+}
+
+fn validate_header(
+    headers: &HashMap<String, String>,
+    field: &'static str,
+    expected: &str,
+) -> std::result::Result<(), UpgradeError> {
+    match headers.get(field).map(|c| c.to_lowercase()) {
+        Some(x) if x == expected => {}
+        r => {
+            return Err(UpgradeError::Header {
+                field,
+                expected: expected.into(),
+                got: r,
+            });
+        }
+    }
+    Ok(())
 }

@@ -26,8 +26,20 @@ impl Message {
             Message::Text(s) => s.as_bytes(),
         }
     }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Message::Binary(b) => b.len(),
+            Message::Text(s) => s.len(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool { self.len() == 0 }
 }
 
+#[derive(Debug)]
 pub(crate) enum PartialMessage {
     Text(Vec<u8>),
     Binary(Vec<u8>),

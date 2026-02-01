@@ -41,21 +41,30 @@ impl<'a, P: EncodePolicy> ControlFrame<'a, P> {
 
     // encoding: sets Opcode, FIN, MASK and optionally masks payload
     pub(crate) fn encode(&self) -> Vec<u8> {
+        let role = if P::MASK_OUTGOING { "CLI" } else { "SRV" };
+        tracing::info!(
+            opcode = ?self.opcode,
+            len = self.payload.len(),
+            "{role} encoding CTRL"
+        );
+
         let mut buf = [0; 131]; // max single frame size
-        buf[0] = self.opcode as u8 | 0x80;
-        buf[1] = u8::try_from(self.payload.len()).expect("ControlFrame payload too large") | 0x80;
+        buf[0] = self.opcode as u8 | 0x80; // always set FIN
+        buf[1] = u8::try_from(self.payload.len()).expect("ControlFrame payload too large");
 
         // Clients must SEND masked
-        if P::MASK_OUTGOING {
+        let header_end = if P::MASK_OUTGOING {
+            buf[1] |= 0x80;
             rand::fill(&mut buf[2..6]);
             for (i, b) in self.payload.iter().enumerate() {
                 buf[6 + i] = b ^ buf[2 + (i % 4)];
             }
-            buf[..6 + self.payload.len()].to_vec()
+            6
         } else {
             buf[2..2 + self.payload.len()].copy_from_slice(self.payload);
-            buf[..2 + self.payload.len()].to_vec()
-        }
+            2
+        };
+        buf[..header_end + self.payload.len()].to_vec()
     }
 }
 

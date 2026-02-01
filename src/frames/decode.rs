@@ -1,15 +1,26 @@
 use std::{array, collections::VecDeque, marker::PhantomData};
 
-use super::{Frame, Opcode};
+use super::Opcode;
 use crate::{role::DecodePolicy, MAX_FRAME_PAYLOAD};
 
 // helper type since decoder errors return FrameParseResult
-type Result<T> = std::result::Result<T, FrameParseResult>;
+type Result<T> = std::result::Result<T, FrameParseError>;
 
 #[derive(Debug)]
-pub(crate) enum FrameParseResult {
-    Complete(Frame),
+pub(crate) struct DecodedFrame {
+    pub(crate) opcode: Opcode,
+    pub(crate) payload: Vec<u8>,
+    pub(crate) is_fin: bool,
+}
+
+#[derive(Debug)]
+pub(crate) enum FrameState {
+    Complete(DecodedFrame),
     Incomplete,
+}
+
+#[derive(Debug)]
+pub(crate) enum FrameParseError {
     ProtoError,
     SizeErr,
 }
@@ -55,49 +66,61 @@ impl<P: DecodePolicy> FrameDecoder<P> {
 
     pub(crate) fn push_bytes(&mut self, bytes: &[u8]) { self.buf.extend(bytes); }
 
-    pub(crate) fn next_frame(&mut self) -> Option<FrameParseResult> {
-        // println!("{}", self.buf.len());
+    pub(crate) fn next_frame(&mut self) -> Result<Option<FrameState>> {
+        tracing::trace!(
+            state = ?self.state,
+            buf_len = self.buf.len(),
+            "decoder step"
+        );
         loop {
             let next_state = match self.state {
                 DecodeState::Header1 => {
-                    let b = self.buf.pop_front()?;
-                    match self.parse_header1(b) {
-                        Ok(state) => state,
-                        Err(e) => return Some(e),
-                    }
+                    let Some(b) = self.buf.pop_front() else {
+                        return Ok(None);
+                    };
+                    self.parse_header1(b)?
                 }
-                DecodeState::Header2 => match self.parse_header2() {
-                    Ok(state) => state,
-                    Err(e) => {
-                        return Some(e);
-                    }
+                DecodeState::Header2 => match self.parse_header2()? {
+                    Some(state) => state,
+                    None => return Ok(Some(FrameState::Incomplete)),
                 },
-                DecodeState::ExtendedLen => match self.parse_extended_len() {
-                    Ok(state) => state,
-                    Err(e) => return Some(e),
+                DecodeState::ExtendedLen => match self.parse_extended_len()? {
+                    Some(state) => state,
+                    None => return Ok(Some(FrameState::Incomplete)),
                 },
+
                 DecodeState::Mask => {
                     let Some(x) = self.pop_n() else {
-                        return Some(FrameParseResult::Incomplete);
+                        return Ok(Some(FrameState::Incomplete));
                     };
                     self.ctx.mask_key = x;
                     DecodeState::Payload
                 }
                 DecodeState::Payload => {
-                    return match self.parse_payload() {
-                        Ok(payload) => {
-                            self.state = DecodeState::Header1;
-                            Some(FrameParseResult::Complete(Frame {
-                                opcode: self.ctx.opcode,
-                                payload,
-                                is_fin: self.ctx.is_fin,
-                            }))
-                        }
-                        Err(e) => Some(e),
+                    let Some(payload) = self.parse_payload()? else {
+                        return Ok(Some(FrameState::Incomplete));
                     };
+                    self.state = DecodeState::Header1;
+
+                    tracing::debug!(
+                        opcode = ?self.ctx.opcode,
+                        fin = self.ctx.is_fin,
+                        payload_len = payload.len(),
+                        masked = self.ctx.mask_key[0] > 0,
+                        "frame decoded"
+                    );
+                    return Ok(Some(FrameState::Complete(DecodedFrame {
+                        opcode: self.ctx.opcode,
+                        payload,
+                        is_fin: self.ctx.is_fin,
+                    })));
                 }
             };
-            // println!("{:?} -> {:?}", self.state, next_state);
+            tracing::trace!(
+                from = ?self.state,
+                to = ?next_state,
+                "state transition"
+            );
             self.state = next_state;
         }
     }
@@ -111,84 +134,102 @@ impl<P: DecodePolicy> FrameDecoder<P> {
             is_fin: match b & 0b1111_0000 {
                 0b1000_0000 => true,
                 0b0000_0000 => false,
-                _ => return Err(FrameParseResult::ProtoError),
+                _ => {
+                    tracing::trace!("invalid RSV bits");
+                    return Err(FrameParseError::ProtoError);
+                }
             },
-            opcode: Opcode::try_from(b & 0b1111).map_err(|()| FrameParseResult::ProtoError)?,
+            opcode: Opcode::try_from(b & 0b1111).map_err(|()| {
+                tracing::trace!("invalid opcode");
+                FrameParseError::ProtoError
+            })?,
+
             payload_len: 0,
             mask_key: [0, 0, 0, 0],
         };
         Ok(DecodeState::Header2)
     }
 
-    fn parse_header2(&mut self) -> Result<DecodeState> {
+    fn parse_header2(&mut self) -> Result<Option<DecodeState>> {
         // 0    | 1 2 3 4 5 6 7
         // Mask | Payload len
         let Some(b) = self.buf.pop_front() else {
-            return Err(FrameParseResult::Incomplete);
+            return Ok(None);
         };
 
         let masked = (b & 0b1000_0000) > 0;
         // Servers must NOT mask message
         if P::EXPECT_MASKED != masked {
-            return Err(FrameParseResult::ProtoError);
+            tracing::trace!("message mask violates policy");
+            return Err(FrameParseError::ProtoError);
         }
 
         self.ctx.payload_len = (b & 0b0111_1111) as usize;
         // Validate control frame size
         if self.ctx.opcode.is_control() && (!self.ctx.is_fin || self.ctx.payload_len > 125) {
-            return Err(FrameParseResult::ProtoError);
+            tracing::trace!("fragmented control frame received");
+            return Err(FrameParseError::ProtoError);
         }
 
-        Ok(if self.ctx.payload_len > 125 {
+        Ok(Some(if self.ctx.payload_len > 125 {
             DecodeState::ExtendedLen
         } else if P::EXPECT_MASKED {
             DecodeState::Mask
         } else {
             DecodeState::Payload
-        })
+        }))
     }
 
-    fn parse_extended_len(&mut self) -> Result<DecodeState> {
+    fn parse_extended_len(&mut self) -> Result<Option<DecodeState>> {
         self.ctx.payload_len = if self.ctx.payload_len == 126 {
             // 126 => 2 bytes extended (u16)
-            let len_bytes = self.pop_n().ok_or(FrameParseResult::Incomplete)?;
+            let Some(len_bytes) = self.pop_n() else {
+                return Ok(None);
+            };
             usize::from(u16::from_be_bytes(len_bytes))
         } else {
             // 127 => 8 bytes extended (u64)
-            let len_bytes = self.pop_n().ok_or(FrameParseResult::Incomplete)?;
-            usize::try_from(u64::from_be_bytes(len_bytes)).map_err(|_| FrameParseResult::SizeErr)?
+            let Some(len_bytes) = self.pop_n() else {
+                return Ok(None);
+            };
+            usize::try_from(u64::from_be_bytes(len_bytes)).map_err(|_| {
+                tracing::trace!("frame exceeded maximum size");
+                FrameParseError::SizeErr
+            })?
         };
 
-        Ok(if P::EXPECT_MASKED {
+        Ok(Some(if P::EXPECT_MASKED {
             DecodeState::Mask
         } else {
             DecodeState::Payload
-        })
+        }))
     }
 
-    fn parse_payload(&mut self) -> Result<Vec<u8>> {
+    fn parse_payload(&mut self) -> Result<Option<Vec<u8>>> {
         if self.buf.len() < self.ctx.payload_len {
-            return Err(FrameParseResult::Incomplete);
+            return Ok(None);
         }
 
         // send close and wait for response
         if self.ctx.payload_len > MAX_FRAME_PAYLOAD {
             self.buf.clear();
             self.state = DecodeState::Header1;
-            return Err(FrameParseResult::SizeErr);
+            tracing::trace!("payload larger than maximum size");
+            return Err(FrameParseError::SizeErr);
         }
 
         let mut payload: Vec<u8> = self.buf.drain(..self.ctx.payload_len).collect();
-        if self.ctx.opcode == Opcode::Close && !is_valid_close_payload(&payload) {
-            return Err(FrameParseResult::ProtoError);
-        }
 
         // apply mask
         if P::EXPECT_MASKED {
             crate::mask::mask(&mut payload, self.ctx.mask_key);
         }
 
-        Ok(payload)
+        if self.ctx.opcode == Opcode::Close && !is_valid_close_payload(&payload) {
+            return Err(FrameParseError::ProtoError);
+        }
+
+        Ok(Some(payload))
     }
 
     fn pop_n<const N: usize>(&mut self) -> Option<[u8; N]> {
@@ -308,14 +349,13 @@ mod tests {
             decoder.push_bytes(&frame_bytes);
 
             match decoder.next_frame() {
-                Some(FrameParseResult::Complete(frame)) => {
+                Ok(Some(FrameState::Complete(frame))) => {
                     // payload matches original
                     assert_eq!(frame.payload, payload);
                     assert_eq!(frame.opcode, opcode);
                     assert_eq!(frame.is_fin, fin);
                 }
-                Some(FrameParseResult::Incomplete) => panic!("Got Incomplete for full frame"),
-                None => panic!("next_frame returned None unexpectedly"),
+                Ok(Some(FrameState::Incomplete)) => panic!("Got Incomplete for full frame"),
                 _ => {}
             }
         }
@@ -325,8 +365,8 @@ mod tests {
             let mut fd = FrameDecoder::<Client>::new();
             fd.push_bytes(&buf);
 
-            while let Some(result) = fd.next_frame() {
-                if let FrameParseResult::Incomplete = result {
+            while let Ok(Some(state)) = fd.next_frame() {
+                if let FrameState::Incomplete = state {
                     break;
                 }
             }
@@ -390,9 +430,9 @@ mod bench {
         let mut decoder = FrameDecoder::<T>::new();
         b.iter(|| {
             decoder.push_bytes(black_box(&frame));
-            while let Some(result) = decoder.next_frame() {
-                if let FrameParseResult::Complete(payload) = result {
-                    black_box(payload);
+            loop {
+                if let Ok(f) = decoder.next_frame() {
+                    black_box(f);
                     break;
                 }
             }

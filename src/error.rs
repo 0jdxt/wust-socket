@@ -33,3 +33,23 @@ pub enum CloseReason {
 impl From<CloseReason> for [u8; 2] {
     fn from(value: CloseReason) -> Self { (value as u16).to_be_bytes() }
 }
+
+impl From<[u8; 2]> for CloseReason {
+    fn from(bytes: [u8; 2]) -> Self {
+        match u16::from_be_bytes(bytes) {
+            1000 => CloseReason::Normal,
+            1001 => CloseReason::GoingAway,
+            1002 => CloseReason::ProtoError,
+            1003 => CloseReason::DataType,
+            1005 => CloseReason::NoneGiven,
+            1006 => CloseReason::Abnormal,
+            1007 => CloseReason::DataError,
+            1008 => CloseReason::Policy,
+            1009 => CloseReason::TooBig,
+            1010 => CloseReason::Extension,
+            1011 => CloseReason::Unexpected,
+            1015 => CloseReason::TLS,
+            _ => unreachable!(),
+        }
+    }
+}

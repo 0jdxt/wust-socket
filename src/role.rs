@@ -17,9 +17,9 @@ impl DecodePolicy for Client {
 
 #[derive(Copy, Clone, Debug)]
 pub struct Server;
-impl DecodePolicy for Server {
-    const EXPECT_MASKED: bool = true;
-}
 impl EncodePolicy for Server {
     const MASK_OUTGOING: bool = false;
+}
+impl DecodePolicy for Server {
+    const EXPECT_MASKED: bool = true;
 }

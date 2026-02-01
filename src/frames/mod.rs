@@ -6,6 +6,5 @@ mod opcode;
 
 pub(crate) use control::ControlFrame;
 pub(crate) use data::DataFrame;
-pub(crate) use decode::{FrameDecoder, FrameParseResult};
-pub(crate) use frame::Frame;
+pub(crate) use decode::{DecodedFrame, FrameDecoder, FrameParseError, FrameState};
 pub(crate) use opcode::Opcode;

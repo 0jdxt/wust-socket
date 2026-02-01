@@ -1,12 +1,13 @@
 use std::{
     io::{Result, Write},
-    net::TcpStream,
+    net::{SocketAddr, TcpStream},
     sync::{atomic::AtomicBool, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
     frames::{ControlFrame, DataFrame, Opcode},
+    ping::PingStats,
     role::EncodePolicy,
     CloseReason,
 };
@@ -15,6 +16,10 @@ pub trait InnerTrait<P: EncodePolicy> {
     fn closing(&self) -> &AtomicBool;
     fn closed(&self) -> &AtomicBool;
     fn writer(&self) -> &Mutex<TcpStream>;
+    fn reader(&self) -> &Mutex<TcpStream>;
+    fn ping_stats(&self) -> &Mutex<PingStats<5>>;
+
+    fn addr(&self) -> Result<SocketAddr> { self.writer().lock().unwrap().local_addr() }
 
     // send data (bytes) over the websocket
     fn send(&self, bytes: &[u8], ty: Opcode) -> Result<()> {
@@ -29,7 +34,10 @@ pub trait InnerTrait<P: EncodePolicy> {
     }
 
     fn close(&self, reason: CloseReason, text: &'static str) -> Result<()> {
-        println!("sending close: {reason:?} {text}");
+        println!(
+            "{}: sending close: {reason:?} {text}",
+            if P::MASK_OUTGOING { "CLI" } else { "SRV" }
+        );
         let code: [u8; 2] = reason.into();
         let mut payload = Vec::with_capacity(2 + text.len());
         payload.extend_from_slice(&code);

@@ -1,7 +1,7 @@
 // Stores and calculates average of last N latencies
 use std::time::Duration;
 
-pub(crate) struct PingStats<const N: usize> {
+pub struct PingStats<const N: usize> {
     history: [Option<Duration>; N],
     idx: usize,
 }
@@ -28,6 +28,10 @@ impl<const N: usize> PingStats<N> {
                 count += 1;
             }
         }
-        if count > 0 { Some(sum / count) } else { None }
+        if count > 0 {
+            Some(sum / count)
+        } else {
+            None
+        }
     }
 }

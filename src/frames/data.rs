@@ -22,36 +22,43 @@ impl<'a, P: EncodePolicy> DataFrame<'a, P> {
     }
 
     pub(crate) fn encode(self) -> Vec<Vec<u8>> {
-        let mut payload = self.payload;
         let mut first = true;
         let mut chunks = Vec::with_capacity(MAX_MESSAGE_SIZE.div_ceil(MAX_FRAME_PAYLOAD));
+        let mut iter = self.payload.chunks(MAX_FRAME_PAYLOAD).peekable();
+        let role = if P::MASK_OUTGOING { "CLI" } else { "SRV" };
 
-        while !payload.is_empty() {
-            let chunk_len = payload.len().min(MAX_FRAME_PAYLOAD);
-            let mut buf = Vec::with_capacity(chunk_len + 14);
+        while let Some(chunk) = iter.next() {
+            tracing::trace!(
+                opcode = ?self.opcode,
+                len = chunk.len(),
+                "{role} encoding DATA"
+            );
 
             // Set OPCODE and FIN
-            let opcode = if first { self.opcode } else { Opcode::Cont };
-            let is_fin = chunk_len == payload.len();
-            buf.push(if is_fin { 0x80 } else { 0 } | opcode as u8);
+            let opcode = if first {
+                first = false;
+                self.opcode
+            } else {
+                Opcode::Cont
+            } as u8;
+            let mut buf = Vec::with_capacity(chunk.len() + 14);
+            buf.push(if iter.peek().is_none() { 0x80 } else { 0 } | opcode);
 
             // push LEN
             #[allow(clippy::cast_possible_truncation)]
-            match chunk_len {
+            match chunk.len() {
                 0..=125 => {
-                    buf.push(chunk_len as u8);
+                    buf.push(chunk.len() as u8);
                 }
                 126..=65535 => {
                     buf.push(126);
-                    buf.extend_from_slice(&(chunk_len as u16).to_be_bytes());
+                    buf.extend_from_slice(&(chunk.len() as u16).to_be_bytes());
                 }
                 _ => {
                     buf.push(127);
-                    buf.extend_from_slice(&(chunk_len as u64).to_be_bytes());
+                    buf.extend_from_slice(&(chunk.len() as u64).to_be_bytes());
                 }
             }
-
-            let chunk = &payload[..chunk_len];
 
             // Clients must SEND masked
             if P::MASK_OUTGOING {
@@ -71,10 +78,10 @@ impl<'a, P: EncodePolicy> DataFrame<'a, P> {
             }
 
             chunks.push(buf);
-            payload = &payload[chunk_len..];
-            first = false;
         }
 
+        let n: usize = chunks.iter().map(Vec::len).sum();
+        tracing::info!(len = n, "{role} encoded DATA");
         chunks
     }
 }
@@ -110,7 +117,7 @@ mod bench {
             }
         })*
     };
-}
+    }
 
     bench_data_sizes!(125, 1024, 4096, 16384, 32768);
 }
