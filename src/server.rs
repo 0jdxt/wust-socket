@@ -114,9 +114,9 @@ impl TryFrom<TcpStream> for ServerConn {
 
         let response = format!(
             "HTTP/1.1 101 Switching Protocols\r\n\
-                     Upgrade: websocket\r\n\
-                     Connection: Upgrade\r\n\
-                     Sec-WebSocket-Accept: {accept_key}\r\n\r\n",
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Accept: {accept_key}\r\n\r\n",
         );
 
         stream.write_all(response.as_bytes()).unwrap();

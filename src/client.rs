@@ -77,17 +77,30 @@ impl WebSocketClient {
     fn start_recv_loop(&self, event_tx: Sender<Event>) { self.recv_loop(event_tx); }
 }
 
+/// Errors that can occur when upgrading a TCP stream to a WebSocket.
 #[derive(Debug)]
 pub enum UpgradeError {
+    /// Failed to read from the TCP stream.
     Read,
+    /// Failed to write to the TCP steam.
     Write,
+    /// Server returned an unexpected HTTP status line.
     StatusLine(String),
+    /// A handshake header did not match expectations.
     Header {
+        /// The name of the header field.
         field: &'static str,
+        /// The expected value.
         expected: String,
+        /// The actual value, if any.
         got: Option<String>,
     },
+    /// Failed to obtain the socket's peer address.
+    ///
+    /// This can happen if the socket is not connected, has been closed,
+    /// or the underlying OS socket is invalid.
     Addr,
+    /// Failed to establish TCP connection.
     Connect,
 }
 
@@ -96,7 +109,7 @@ impl TryFrom<TcpStream> for WebSocketClient {
     /// Returns [`std::io::Error`] if unable to read from or write to the [`TcpStream`], or if there was a handshake failure whilst upgrading the connection.
     type Error = UpgradeError;
 
-    fn try_from(mut stream: TcpStream) -> std::result::Result<Self, Self::Error> {
+    fn try_from(mut stream: TcpStream) -> Result<Self> {
         let sec_websocket_key = {
             let mut key_bytes = [0u8; 16];
             rand::fill(&mut key_bytes);

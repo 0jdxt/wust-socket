@@ -16,7 +16,7 @@ mod role;
 mod server;
 mod ws;
 
-pub use client::WebSocketClient;
+pub use client::{UpgradeError, WebSocketClient};
 pub use error::CloseReason;
 pub use protocol::Message;
 pub use server::{ServerConn, WebSocketServer};
