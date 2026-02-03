@@ -14,47 +14,27 @@ use std::{
 
 use base64::engine::{general_purpose::STANDARD as BASE64, Engine};
 
-use crate::{inner::InnerTrait, protocol::PingStats, role::Client, ws::WebSocket, Event};
+use crate::{inner::ConnInner, protocol::PingStats, role::Client, ws::WebSocket, Event};
 
 type Result<T> = std::result::Result<T, UpgradeError>;
-pub type WebSocketClient = WebSocket<ClientInner, Client>;
 
-pub struct ClientInner {
-    reader: Mutex<TcpStream>,
-    writer: Mutex<TcpStream>,
-    ping_stats: Mutex<PingStats>,
-    closing: AtomicBool,
-    closed: AtomicBool,
-}
+pub type WebSocketClient = WebSocket<Client>;
 
-impl InnerTrait<Client> for ClientInner {
-    fn closing(&self) -> &AtomicBool { &self.closing }
-
-    fn closed(&self) -> &AtomicBool { &self.closed }
-
-    fn writer(&self) -> &Mutex<TcpStream> { &self.writer }
-
-    fn reader(&self) -> &Mutex<TcpStream> { &self.reader }
-
-    fn ping_stats(&self) -> &Mutex<PingStats> { &self.ping_stats }
-}
-
+/// Client connection implementation for WebSocket
 impl WebSocketClient {
+    /// Attempts to connect to socket and upgrade connection.
     pub fn connect(addr: impl ToSocketAddrs) -> Result<Self> {
         TcpStream::connect(addr)
             .map_err(|_| UpgradeError::Connect)?
             .try_into()
     }
 
+    /// Attempts to connect to socket and upgrade connection, with timeout.
     pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> Result<Self> {
         TcpStream::connect_timeout(addr, timeout)
             .map_err(|_| UpgradeError::Connect)?
             .try_into()
     }
-
-    /// Average latency in ms form last 5 pings
-    #[must_use]
-    pub fn latency(&self) -> Option<u16> { self.inner.ping_stats.lock().unwrap().average() }
 
     /// Start a ping loop in a background thread
     fn start_ping_loop(&self, interval_secs: u64, event_tx: Sender<Event>) {
@@ -185,15 +165,15 @@ impl TryFrom<TcpStream> for WebSocketClient {
         let (event_tx, event_rx) = channel();
         let stream = reader.into_inner();
         let ws = WebSocket {
-            inner: Arc::new(ClientInner {
+            inner: Arc::new(ConnInner {
                 reader: Mutex::new(stream.try_clone().map_err(|_| UpgradeError::Read)?),
                 writer: Mutex::new(stream),
                 ping_stats: Mutex::new(PingStats::new()),
                 closing: AtomicBool::new(false),
                 closed: AtomicBool::new(false),
+                _role: PhantomData,
             }),
             event_rx,
-            _p: PhantomData,
         };
         ws.start_recv_loop(event_tx.clone());
         ws.start_ping_loop(30, event_tx.clone());

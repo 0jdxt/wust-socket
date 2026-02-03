@@ -7,12 +7,11 @@ use std::{
 use super::frame_handler::handle_frame;
 use crate::{
     frames::{FrameDecoder, FrameParseError, FrameState},
-    inner::InnerTrait,
     role::{DecodePolicy, EncodePolicy},
     CloseReason, Event, WebSocket, MAX_FRAME_PAYLOAD,
 };
 
-impl<I: InnerTrait<R> + Send + Sync, R: EncodePolicy + DecodePolicy> WebSocket<I, R> {
+impl<R: EncodePolicy + DecodePolicy + Send + Sync + 'static> WebSocket<R> {
     pub(crate) fn recv_loop(&self, event_tx: Sender<Event>) {
         let inner = Arc::clone(&self.inner);
         thread::spawn(move || {
@@ -29,7 +28,7 @@ impl<I: InnerTrait<R> + Send + Sync, R: EncodePolicy + DecodePolicy> WebSocket<I
             let mut fd = FrameDecoder::<R>::new();
             loop {
                 let n = {
-                    match inner.reader().lock().unwrap().read(&mut buf) {
+                    match inner.reader.lock().unwrap().read(&mut buf) {
                         Ok(0) => {
                             tracing::info!("TCP FIN");
                             break;
@@ -50,7 +49,7 @@ impl<I: InnerTrait<R> + Send + Sync, R: EncodePolicy + DecodePolicy> WebSocket<I
                             if handle_frame(&frame, &inner, &mut partial_msg, &event_tx).is_none() {
                                 // finished processing frames for now
                                 // if the connection is closing, just read and discard until FIN
-                                inner.closing().store(true, Ordering::Release);
+                                inner.closing.store(true, Ordering::Release);
                                 break;
                             }
                         }
@@ -66,7 +65,7 @@ impl<I: InnerTrait<R> + Send + Sync, R: EncodePolicy + DecodePolicy> WebSocket<I
                         Err(FrameParseError::ProtoError) => {
                             // close connection with ProtoError
                             tracing::warn!("protocol violation detected, entering closing state");
-                            inner.closing().store(true, Ordering::Release);
+                            inner.closing.store(true, Ordering::Release);
                             let _ = inner.close(
                                 CloseReason::ProtoError,
                                 "There was a ws protocol violation.",
@@ -76,15 +75,15 @@ impl<I: InnerTrait<R> + Send + Sync, R: EncodePolicy + DecodePolicy> WebSocket<I
                         Err(FrameParseError::SizeErr) => {
                             // close connection with TooBig
                             tracing::warn!("size error detected, entering closing state");
-                            inner.closing().store(true, Ordering::Release);
+                            inner.closing.store(true, Ordering::Release);
                             let _ = inner.close(CloseReason::TooBig, "Frame exceeded maximum size");
                             break;
                         }
                     }
                 }
             }
-            inner.closing().store(true, Ordering::Release);
-            inner.closed().store(true, Ordering::Release);
+            inner.closing.store(true, Ordering::Release);
+            inner.closed.store(true, Ordering::Release);
             let _ = event_tx.send(Event::Closed);
         });
     }

@@ -1,43 +1,19 @@
 use std::{
     io::{Error, Read, Result, Write},
     marker::PhantomData,
-    net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
+    net::{TcpListener, TcpStream, ToSocketAddrs},
     sync::{atomic::AtomicBool, mpsc::channel, Arc, Mutex},
     thread,
 };
 
 use base64::engine::{general_purpose::STANDARD as base64, Engine};
 
-use crate::{inner::InnerTrait, protocol::PingStats, role::Server, ws::WebSocket, Event, Message};
+use crate::{inner::ConnInner, protocol::PingStats, role::Server, ws::WebSocket, Event, Message};
+
+pub type ServerConn = WebSocket<Server>;
 
 pub struct WebSocketServer {
     listener: TcpListener,
-}
-
-pub type ServerConn = WebSocket<ServerConnInner, Server>;
-
-impl ServerConn {
-    pub fn addr(&self) -> Result<SocketAddr> { self.inner.reader.lock().unwrap().local_addr() }
-}
-
-pub struct ServerConnInner {
-    reader: Mutex<TcpStream>,
-    writer: Mutex<TcpStream>,
-    ping_stats: Mutex<PingStats>,
-    closed: AtomicBool,
-    closing: AtomicBool,
-}
-
-impl InnerTrait<Server> for ServerConnInner {
-    fn writer(&self) -> &Mutex<TcpStream> { &self.writer }
-
-    fn reader(&self) -> &Mutex<TcpStream> { &self.reader }
-
-    fn ping_stats(&self) -> &Mutex<PingStats> { &self.ping_stats }
-
-    fn closed(&self) -> &AtomicBool { &self.closed }
-
-    fn closing(&self) -> &AtomicBool { &self.closing }
 }
 
 impl WebSocketServer {
@@ -85,8 +61,6 @@ impl WebSocketServer {
         }
         Ok(())
     }
-
-    pub fn addr(&self) -> Result<SocketAddr> { self.listener.local_addr() }
 }
 
 impl TryFrom<TcpStream> for ServerConn {
@@ -123,15 +97,15 @@ impl TryFrom<TcpStream> for ServerConn {
 
         let (_, event_rx) = channel();
         Ok(Self {
-            inner: Arc::new(ServerConnInner {
+            inner: Arc::new(ConnInner {
                 reader: Mutex::new(stream.try_clone()?),
                 writer: Mutex::new(stream),
                 ping_stats: Mutex::new(PingStats::new()),
                 closed: AtomicBool::new(false),
                 closing: AtomicBool::new(false),
+                _role: PhantomData,
             }),
             event_rx,
-            _p: PhantomData,
         })
     }
 }

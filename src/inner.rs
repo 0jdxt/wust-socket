@@ -1,5 +1,6 @@
 use std::{
     io::{Result, Write},
+    marker::PhantomData,
     net::{SocketAddr, TcpStream},
     sync::{atomic::AtomicBool, Mutex},
 };
@@ -7,30 +8,33 @@ use std::{
 use crate::{
     frames::{ControlFrame, DataFrame, Opcode},
     protocol::PingStats,
-    role::EncodePolicy,
+    role::{DecodePolicy, EncodePolicy},
     CloseReason,
 };
 
-pub trait InnerTrait<P: EncodePolicy> {
-    fn closing(&self) -> &AtomicBool;
-    fn closed(&self) -> &AtomicBool;
-    fn writer(&self) -> &Mutex<TcpStream>;
-    fn reader(&self) -> &Mutex<TcpStream>;
-    fn ping_stats(&self) -> &Mutex<PingStats>;
+pub(crate) struct ConnInner<R: EncodePolicy + DecodePolicy> {
+    pub(crate) reader: Mutex<TcpStream>,
+    pub(crate) writer: Mutex<TcpStream>,
+    pub(crate) ping_stats: Mutex<PingStats>,
+    pub(crate) closed: AtomicBool,
+    pub(crate) closing: AtomicBool,
+    pub(crate) _role: PhantomData<R>,
+}
 
-    fn addr(&self) -> Result<SocketAddr> { self.writer().lock().unwrap().local_addr() }
+impl<R: EncodePolicy + DecodePolicy> ConnInner<R> {
+    pub(crate) fn addr(&self) -> Result<SocketAddr> { self.writer.lock().unwrap().local_addr() }
 
     // send data (bytes) over the websocket
-    fn send(&self, bytes: &[u8], ty: Opcode) -> Result<()> {
-        let frame = DataFrame::<P>::new(bytes, ty);
+    pub(crate) fn send(&self, bytes: &[u8], ty: Opcode) -> Result<()> {
+        let frame = DataFrame::<R>::new(bytes, ty);
         self.write_chunks(frame.encode())
     }
 
     // close with reason code and text
-    fn close(&self, reason: CloseReason, text: &'static str) -> Result<()> {
+    pub(crate) fn close(&self, reason: CloseReason, text: &'static str) -> Result<()> {
         println!(
             "{}: sending close: {reason:?} {text}",
-            if P::MASK_OUTGOING { "CLI" } else { "SRV" }
+            if R::MASK_OUTGOING { "CLI" } else { "SRV" }
         );
         let code: [u8; 2] = reason.into();
         let mut payload = Vec::with_capacity(2 + text.len());
@@ -40,26 +44,26 @@ pub trait InnerTrait<P: EncodePolicy> {
     }
 
     // send close request
-    fn close_raw(&self, payload: &[u8]) -> Result<()> {
-        let bytes = ControlFrame::<P>::close(payload).encode();
+    pub(crate) fn close_raw(&self, payload: &[u8]) -> Result<()> {
+        let bytes = ControlFrame::<R>::close(payload).encode();
         self.write_once(&bytes)
     }
 
     // send ping with a timestamp
-    fn ping(&self) -> Result<()> {
+    pub(crate) fn ping(&self) -> Result<()> {
         // send nonce as payload, store Instant
-        let payload = self.ping_stats().lock().unwrap().new_ping();
-        self.write_once(&ControlFrame::<P>::ping(&payload).encode())
+        let payload = self.ping_stats.lock().unwrap().new_ping();
+        self.write_once(&ControlFrame::<R>::ping(&payload).encode())
     }
 
-    fn write_once(&self, bytes: &[u8]) -> Result<()> {
-        let mut ws = self.writer().lock().unwrap();
+    pub(crate) fn write_once(&self, bytes: &[u8]) -> Result<()> {
+        let mut ws = self.writer.lock().unwrap();
         ws.write_all(bytes)?;
         ws.flush()
     }
 
-    fn write_chunks(&self, chunks: impl IntoIterator<Item = Vec<u8>>) -> Result<()> {
-        let mut ws = self.writer().lock().unwrap();
+    pub(crate) fn write_chunks(&self, chunks: impl IntoIterator<Item = Vec<u8>>) -> Result<()> {
+        let mut ws = self.writer.lock().unwrap();
         for chunk in chunks {
             ws.write_all(&chunk)?;
         }

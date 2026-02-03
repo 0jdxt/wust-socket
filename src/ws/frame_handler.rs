@@ -3,14 +3,14 @@ use std::sync::{Arc, atomic::Ordering, mpsc::Sender};
 use crate::{
     CloseReason, Event, MAX_MESSAGE_SIZE,
     frames::{ControlFrame, DecodedFrame, Opcode},
-    inner::InnerTrait,
+    inner::ConnInner,
     protocol::{Message, PartialMessage, PongError},
-    role::EncodePolicy,
+    role::{DecodePolicy, EncodePolicy},
 };
 
-pub(super) fn handle_frame<P: EncodePolicy, I: InnerTrait<P>>(
+pub(super) fn handle_frame<P: EncodePolicy + DecodePolicy>(
     frame: &DecodedFrame,
-    inner: &Arc<I>,
+    inner: &Arc<ConnInner<P>>,
     partial_msg: &mut Option<PartialMessage>,
     event_tx: &Sender<Event>,
 ) -> Option<()> {
@@ -29,28 +29,24 @@ pub(super) fn handle_frame<P: EncodePolicy, I: InnerTrait<P>>(
 }
 
 // Reply with pong
-fn handle_ping<P, I>(frame: &DecodedFrame, inner: &Arc<I>)
-where
-    P: EncodePolicy,
-    I: InnerTrait<P>,
-{
+fn handle_ping<R: EncodePolicy + DecodePolicy>(frame: &DecodedFrame, inner: &Arc<ConnInner<R>>) {
     tracing::debug!("received PING, scheduling PONG");
-    let bytes = ControlFrame::<P>::pong(&frame.payload).encode();
+    let bytes = ControlFrame::<R>::pong(&frame.payload).encode();
     let _ = inner.write_once(&bytes);
 }
 
 // Try to parse payload as nonce and check it matches,
 // otherwise if latency exceeds u16::MAX ms, we close the connection
 // else its unsolicited and we ignore
-fn handle_pong<P: EncodePolicy, I: InnerTrait<P>>(
+fn handle_pong<R: EncodePolicy + DecodePolicy>(
     frame: &DecodedFrame,
-    inner: &Arc<I>,
+    inner: &Arc<ConnInner<R>>,
     event_tx: &Sender<Event>,
 ) {
     tracing::debug!("received PONG");
     if let Ok(bytes) = frame.payload.as_slice().try_into() {
         let nonce = u16::from_be_bytes(bytes);
-        match inner.ping_stats().lock().unwrap().on_pong(nonce) {
+        match inner.ping_stats.lock().unwrap().on_pong(nonce) {
             Ok(latency) => {
                 let _ = event_tx.send(Event::Pong(latency));
             }
@@ -66,15 +62,15 @@ fn handle_pong<P: EncodePolicy, I: InnerTrait<P>>(
 }
 
 // If closing, shutdown; otherwise, reply with close frame
-fn handle_close<P: EncodePolicy, I: InnerTrait<P>>(
+fn handle_close<R: EncodePolicy + DecodePolicy>(
     frame: &DecodedFrame,
-    inner: &Arc<I>,
+    inner: &Arc<ConnInner<R>>,
     event_tx: &Sender<Event>,
 ) {
     let code = CloseReason::from([frame.payload[0], frame.payload[1]]);
     tracing::info!(reason=?code, "recieved Close frame");
     // if not already closing try to send close frame, log err
-    if !inner.closing().swap(true, Ordering::AcqRel)
+    if !inner.closing.swap(true, Ordering::AcqRel)
         && let Err(e) = inner.close_raw(&frame.payload)
     {
         tracing::warn!("Err: error sending close: {e}");
@@ -83,10 +79,10 @@ fn handle_close<P: EncodePolicy, I: InnerTrait<P>>(
 }
 
 // Build message out of frames
-fn handle_message<P: EncodePolicy, I: InnerTrait<P>>(
+fn handle_message<R: EncodePolicy + DecodePolicy>(
     frame: &DecodedFrame,
     partial_msg: &mut Option<PartialMessage>,
-    inner: &Arc<I>,
+    inner: &Arc<ConnInner<R>>,
     event_tx: &Sender<Event>,
 ) -> Option<()> {
     // TODO: Leniency
