@@ -5,10 +5,10 @@ use crate::{
     frames::{ControlFrame, DecodedFrame, Opcode},
     inner::ConnInner,
     protocol::{Message, PartialMessage, PongError},
-    role::{DecodePolicy, EncodePolicy},
+    role::{RolePolicy},
 };
 
-pub(super) fn handle_frame<P: EncodePolicy + DecodePolicy>(
+pub(super) fn handle_frame<P: RolePolicy>(
     frame: &DecodedFrame,
     inner: &Arc<ConnInner<P>>,
     partial_msg: &mut Option<PartialMessage>,
@@ -29,7 +29,7 @@ pub(super) fn handle_frame<P: EncodePolicy + DecodePolicy>(
 }
 
 // Reply with pong
-fn handle_ping<R: EncodePolicy + DecodePolicy>(frame: &DecodedFrame, inner: &Arc<ConnInner<R>>) {
+fn handle_ping<R: RolePolicy>(frame: &DecodedFrame, inner: &Arc<ConnInner<R>>) {
     tracing::debug!("received PING, scheduling PONG");
     let bytes = ControlFrame::<R>::pong(&frame.payload).encode();
     let _ = inner.write_once(&bytes);
@@ -38,7 +38,7 @@ fn handle_ping<R: EncodePolicy + DecodePolicy>(frame: &DecodedFrame, inner: &Arc
 // Try to parse payload as nonce and check it matches,
 // otherwise if latency exceeds u16::MAX ms, we close the connection
 // else its unsolicited and we ignore
-fn handle_pong<R: EncodePolicy + DecodePolicy>(
+fn handle_pong<R: RolePolicy>(
     frame: &DecodedFrame,
     inner: &Arc<ConnInner<R>>,
     event_tx: &Sender<Event>,
@@ -62,7 +62,7 @@ fn handle_pong<R: EncodePolicy + DecodePolicy>(
 }
 
 // If closing, shutdown; otherwise, reply with close frame
-fn handle_close<R: EncodePolicy + DecodePolicy>(
+fn handle_close<R: RolePolicy>(
     frame: &DecodedFrame,
     inner: &Arc<ConnInner<R>>,
     event_tx: &Sender<Event>,
@@ -79,7 +79,7 @@ fn handle_close<R: EncodePolicy + DecodePolicy>(
 }
 
 // Build message out of frames
-fn handle_message<R: EncodePolicy + DecodePolicy>(
+fn handle_message<R: RolePolicy>(
     frame: &DecodedFrame,
     partial_msg: &mut Option<PartialMessage>,
     inner: &Arc<ConnInner<R>>,

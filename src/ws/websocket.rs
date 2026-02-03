@@ -8,17 +8,17 @@ use std::{
 use crate::{
     frames::Opcode,
     inner::ConnInner,
-    role::{DecodePolicy, EncodePolicy},
+    role::{RolePolicy},
     CloseReason, Event,
 };
 
-pub struct WebSocket<R: EncodePolicy + DecodePolicy> {
+pub struct WebSocket<R: RolePolicy> {
     pub(crate) inner: Arc<ConnInner<R>>,
     pub(crate) event_rx: Receiver<Event>,
 }
 
 /// Best-effort close if user forgets to call [`WebSocket::close`].
-impl<R: EncodePolicy + DecodePolicy> Drop for WebSocket<R> {
+impl<R: RolePolicy> Drop for WebSocket<R> {
     fn drop(&mut self) {
         if !self.inner.closing.load(Ordering::Acquire) {
             let _ = self.close();
@@ -26,7 +26,7 @@ impl<R: EncodePolicy + DecodePolicy> Drop for WebSocket<R> {
     }
 }
 
-impl<R: EncodePolicy + DecodePolicy> WebSocket<R> {
+impl<R: RolePolicy> WebSocket<R> {
     pub fn send_text(&self, text: &str) -> Result<()> {
         self.inner.send(text.as_bytes(), Opcode::Text)
     }

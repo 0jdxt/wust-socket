@@ -1,12 +1,12 @@
 use std::marker::PhantomData;
 
 use super::Opcode;
-use crate::role::EncodePolicy;
+use crate::role::RolePolicy;
 
 // -- FAST PATH --
 // Separate ControlFrame struct to allow a fast path for sending single frames (Ping, Pong, Close) which
 // will have a payload <= 125 bytes and FIN always set.
-pub(crate) struct ControlFrame<'a, P: EncodePolicy> {
+pub(crate) struct ControlFrame<'a, P: RolePolicy> {
     opcode: Opcode,
     payload: &'a [u8],
     _p: PhantomData<P>,
@@ -14,7 +14,7 @@ pub(crate) struct ControlFrame<'a, P: EncodePolicy> {
 
 // Functions to produce each kind of ControlFrame with payload,
 // and a send function to write to stream
-impl<'a, P: EncodePolicy> ControlFrame<'a, P> {
+impl<'a, P: RolePolicy> ControlFrame<'a, P> {
     pub(crate) fn ping(payload: &'a [u8]) -> Self {
         Self {
             opcode: Opcode::Ping,
@@ -79,7 +79,7 @@ mod bench {
 
     fn make_payload(len: usize) -> Vec<u8> { (0..len).map(|i| i as u8).collect() }
 
-    fn bench_control_frame<P: EncodePolicy>(b: &mut Bencher, payload_len: usize) {
+    fn bench_control_frame<P: RolePolicy>(b: &mut Bencher, payload_len: usize) {
         let payload = make_payload(payload_len);
         b.iter(|| {
             let frame = ControlFrame::<P>::ping(&payload);

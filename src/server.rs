@@ -25,14 +25,18 @@ impl WebSocketServer {
 
     pub fn run(&self) -> Result<()> {
         for stream in self.listener.incoming() {
-            let ws: ServerConn = stream?.try_into().unwrap();
-            tracing::info!(addr = ws.inner.addr()?.to_string(), "SVR: client connected");
-            let (event_tx, event_rx) = channel();
-            ws.recv_loop(event_tx);
-            ws.ping()?;
-
-            // Spawn a thread to handle events from this client
+            let stream = stream?;
             thread::spawn(move || {
+                let ws: ServerConn = stream.try_into().unwrap();
+                tracing::info!(
+                    addr = ws.inner.addr().unwrap().to_string(),
+                    "SVR: client connected"
+                );
+                let (event_tx, event_rx) = channel();
+                ws.recv_loop(event_tx);
+                let _ = ws.ping();
+
+                // Spawn a thread to handle events from this client
                 for event in event_rx {
                     match event {
                         Event::Message(msg) => match msg {

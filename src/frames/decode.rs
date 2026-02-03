@@ -1,7 +1,7 @@
 use std::{array, collections::VecDeque, marker::PhantomData};
 
 use super::Opcode;
-use crate::{role::DecodePolicy, MAX_FRAME_PAYLOAD};
+use crate::{role::RolePolicy, MAX_FRAME_PAYLOAD};
 
 // helper type since decoder errors return FrameParseResult
 type Result<T> = std::result::Result<T, FrameParseError>;
@@ -25,7 +25,7 @@ pub(crate) enum FrameParseError {
     SizeErr,
 }
 
-pub(crate) struct FrameDecoder<P: DecodePolicy> {
+pub(crate) struct FrameDecoder<P: RolePolicy> {
     buf: VecDeque<u8>,
     state: DecodeState,
     ctx: DecodeContext,
@@ -49,7 +49,7 @@ struct DecodeContext {
     mask_key: [u8; 4],
 }
 
-impl<P: DecodePolicy> FrameDecoder<P> {
+impl<P: RolePolicy> FrameDecoder<P> {
     pub(crate) fn new() -> Self {
         Self {
             buf: VecDeque::new(),
@@ -381,9 +381,9 @@ mod bench {
     use test::{black_box, Bencher};
 
     use super::*;
-    use crate::role::{Client, DecodePolicy, Server};
+    use crate::role::{Client, RolePolicy, Server};
 
-    fn make_test_frame<T: DecodePolicy>(payload_len: usize) -> Vec<u8> {
+    fn make_test_frame<T: RolePolicy>(payload_len: usize) -> Vec<u8> {
         let mut frame = Vec::with_capacity(2 + payload_len);
         let fin_rsv_opcode = 0b1000_0000; // FIN set, RSV=0, opcode=0 (continuation)
         frame.push(fin_rsv_opcode);
@@ -424,7 +424,7 @@ mod bench {
 
     fn bench_decode_frame<T>(b: &mut Bencher, payload_len: usize)
     where
-        T: DecodePolicy,
+        T: RolePolicy,
     {
         let frame = make_test_frame::<T>(payload_len);
         let mut decoder = FrameDecoder::<T>::new();

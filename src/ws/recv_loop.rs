@@ -7,11 +7,11 @@ use std::{
 use super::frame_handler::handle_frame;
 use crate::{
     frames::{FrameDecoder, FrameParseError, FrameState},
-    role::{DecodePolicy, EncodePolicy},
+    role::{RolePolicy},
     CloseReason, Event, WebSocket, MAX_FRAME_PAYLOAD,
 };
 
-impl<R: EncodePolicy + DecodePolicy + Send + Sync + 'static> WebSocket<R> {
+impl<R: RolePolicy + Send + Sync + 'static> WebSocket<R> {
     pub(crate) fn recv_loop(&self, event_tx: Sender<Event>) {
         let inner = Arc::clone(&self.inner);
         thread::spawn(move || {

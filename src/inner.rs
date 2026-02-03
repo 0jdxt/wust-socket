@@ -8,11 +8,11 @@ use std::{
 use crate::{
     frames::{ControlFrame, DataFrame, Opcode},
     protocol::PingStats,
-    role::{DecodePolicy, EncodePolicy},
+    role::{RolePolicy},
     CloseReason,
 };
 
-pub(crate) struct ConnInner<R: EncodePolicy + DecodePolicy> {
+pub(crate) struct ConnInner<R: RolePolicy> {
     pub(crate) reader: Mutex<TcpStream>,
     pub(crate) writer: Mutex<TcpStream>,
     pub(crate) ping_stats: Mutex<PingStats>,
@@ -21,7 +21,7 @@ pub(crate) struct ConnInner<R: EncodePolicy + DecodePolicy> {
     pub(crate) _role: PhantomData<R>,
 }
 
-impl<R: EncodePolicy + DecodePolicy> ConnInner<R> {
+impl<R: RolePolicy> ConnInner<R> {
     pub(crate) fn addr(&self) -> Result<SocketAddr> { self.writer.lock().unwrap().local_addr() }
 
     // send data (bytes) over the websocket

@@ -1,18 +1,18 @@
 use std::marker::PhantomData;
 
 use super::Opcode;
-use crate::{role::EncodePolicy, MAX_FRAME_PAYLOAD, MAX_MESSAGE_SIZE};
+use crate::{role::RolePolicy, MAX_FRAME_PAYLOAD, MAX_MESSAGE_SIZE};
 
 // -- SLOW PATH --
 // DataFrames may be fragmented or very large hence they need extra processing compared to
 // ControlFrames
-pub(crate) struct DataFrame<'a, P: EncodePolicy> {
+pub(crate) struct DataFrame<'a, P: RolePolicy> {
     opcode: Opcode,
     payload: &'a [u8],
     _p: PhantomData<P>,
 }
 
-impl<'a, P: EncodePolicy> DataFrame<'a, P> {
+impl<'a, P: RolePolicy> DataFrame<'a, P> {
     pub(crate) fn new(payload: &'a [u8], opcode: Opcode) -> Self {
         Self {
             opcode,
@@ -96,7 +96,7 @@ mod bench {
 
     fn make_payload(len: usize) -> Vec<u8> { (0..len).map(|i| i as u8).collect() }
 
-    fn bench_data_frame<P: EncodePolicy>(b: &mut Bencher, payload_len: usize) {
+    fn bench_data_frame<P: RolePolicy>(b: &mut Bencher, payload_len: usize) {
         let payload = make_payload(payload_len);
         b.iter(|| {
             let frame = DataFrame::<P>::new(&payload, Opcode::Text);

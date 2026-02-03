@@ -1,25 +1,18 @@
-pub trait EncodePolicy {
+pub trait RolePolicy {
     const MASK_OUTGOING: bool;
-}
-
-pub trait DecodePolicy {
     const EXPECT_MASKED: bool;
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct Client;
-impl EncodePolicy for Client {
-    const MASK_OUTGOING: bool = true;
-}
-impl DecodePolicy for Client {
+impl RolePolicy for Client {
     const EXPECT_MASKED: bool = false;
+    const MASK_OUTGOING: bool = true;
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct Server;
-impl EncodePolicy for Server {
-    const MASK_OUTGOING: bool = false;
-}
-impl DecodePolicy for Server {
+impl RolePolicy for Server {
     const EXPECT_MASKED: bool = true;
+    const MASK_OUTGOING: bool = false;
 }
