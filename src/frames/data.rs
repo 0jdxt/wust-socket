@@ -25,13 +25,12 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
         let mut first = true;
         let mut chunks = Vec::with_capacity(MAX_MESSAGE_SIZE.div_ceil(MAX_FRAME_PAYLOAD));
         let mut iter = self.payload.chunks(MAX_FRAME_PAYLOAD).peekable();
-        let role = if P::MASK_OUTGOING { "CLI" } else { "SRV" };
 
         while let Some(chunk) = iter.next() {
             tracing::trace!(
                 opcode = ?self.opcode,
                 len = chunk.len(),
-                "{role} encoding DATA"
+                "encoding DATA"
             );
 
             // Set OPCODE and FIN
@@ -80,7 +79,7 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
             chunks.push(buf);
         }
 
-        tracing::info!(len = self.payload.len(), "{role} encoded DATA");
+        tracing::info!(len = self.payload.len(), "encoded DATA");
         chunks
     }
 }

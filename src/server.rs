@@ -33,10 +33,6 @@ impl WebSocketServer {
             let stream = stream?;
             thread::spawn(move || {
                 let ws: ServerConn = stream.try_into().unwrap();
-                tracing::info!(
-                    addr = ws.inner.addr().unwrap().to_string(),
-                    "SVR: client connected"
-                );
                 let (event_tx, event_rx) = channel();
                 ws.recv_loop(event_tx);
                 let _ = ws.ping();
@@ -103,6 +99,8 @@ impl TryFrom<TcpStream> for ServerConn {
         );
 
         stream.write_all(response.as_bytes()).unwrap();
+
+        tracing::info!(addr = ?stream.peer_addr().unwrap(), "upgraded client");
 
         let (_, event_rx) = channel();
         Ok(Self {

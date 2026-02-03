@@ -68,18 +68,29 @@ impl<R: RolePolicy + Send + Sync + 'static> WebSocket<R> {
         self.event_rx.recv_timeout(timeout).ok()
     }
 
+    pub(crate) fn ping_loop(&self, interval_secs: u64, event_tx: Sender<Event>) {
+        // default to 30s
+        let interval = Duration::from_secs(interval_secs);
+        let inner = self.inner.clone();
+        thread::spawn(move || loop {
+            if inner.closing.load(Ordering::Acquire) {
+                tracing::info!("socket closing, stopping ping loop");
+                break;
+            }
+            if let Err(e) = inner.ping() {
+                tracing::warn!("Ping failed, stopping ping loop.");
+                let _ = event_tx.send(Event::Error(e));
+                break;
+            }
+            thread::sleep(interval);
+        });
+    }
+
     pub(crate) fn recv_loop(&self, event_tx: Sender<Event>) {
         let inner = self.inner.clone();
         thread::spawn(move || {
             let mut buf = vec![0; MAX_FRAME_PAYLOAD];
             let mut partial_msg = None;
-
-            let span = tracing::info_span!(
-                "recv",
-                addr = %inner.addr().unwrap(),
-                role = if R::MASK_OUTGOING { "CLI" } else { "SRV" },
-            );
-            let _enter = span.enter();
 
             let mut fd = FrameDecoder::<R>::new();
             loop {

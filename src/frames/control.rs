@@ -41,11 +41,10 @@ impl<'a, P: RolePolicy> ControlFrame<'a, P> {
 
     // encoding: sets Opcode, FIN, MASK and optionally masks payload
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let role = if P::MASK_OUTGOING { "CLI" } else { "SRV" };
         tracing::info!(
             opcode = ?self.opcode,
             len = self.payload.len(),
-            "{role} encoding CTRL"
+            "encoding CTRL"
         );
 
         let mut buf = [0; 131]; // max single frame size

@@ -3,12 +3,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     marker::PhantomData,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc::{channel, Sender},
-        Arc, Mutex,
-    },
-    thread,
+    sync::{atomic::AtomicBool, mpsc::channel, Arc, Mutex},
     time::Duration,
 };
 
@@ -18,7 +13,6 @@ use crate::{
     protocol::PingStats,
     role::Client,
     ws::{ConnInner, WebSocket},
-    Event,
 };
 
 type Result<T> = std::result::Result<T, UpgradeError>;
@@ -40,27 +34,6 @@ impl WebSocketClient {
             .map_err(|_| UpgradeError::Connect)?
             .try_into()
     }
-
-    /// Start a ping loop in a background thread
-    fn start_ping_loop(&self, event_tx: Sender<Event>) {
-        // default to 30s
-        let interval = Duration::from_secs(30);
-        let inner = self.inner.clone();
-        thread::spawn(move || loop {
-            if inner.closing.load(Ordering::Acquire) {
-                tracing::info!("socket closing, stopping ping loop");
-                break;
-            }
-            if let Err(e) = inner.ping() {
-                tracing::warn!("Ping failed, stopping ping loop.");
-                let _ = event_tx.send(Event::Error(e));
-                break;
-            }
-            thread::sleep(interval);
-        });
-    }
-
-    fn start_recv_loop(&self, event_tx: Sender<Event>) { self.recv_loop(event_tx); }
 }
 
 /// Errors that can occur when upgrading a TCP stream to a WebSocket.
@@ -186,8 +159,8 @@ impl TryFrom<TcpStream> for WebSocketClient {
             }),
             event_rx,
         };
-        ws.start_recv_loop(event_tx.clone());
-        ws.start_ping_loop(event_tx.clone());
+        ws.recv_loop(event_tx.clone());
+        ws.ping_loop(30, event_tx.clone());
         Ok(ws)
     }
 }
