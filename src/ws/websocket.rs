@@ -69,7 +69,7 @@ impl<R: RolePolicy + Send + Sync + 'static> WebSocket<R> {
     }
 
     pub(crate) fn recv_loop(&self, event_tx: Sender<Event>) {
-        let inner = Arc::clone(&self.inner);
+        let inner = self.inner.clone();
         thread::spawn(move || {
             let mut buf = vec![0; MAX_FRAME_PAYLOAD];
             let mut partial_msg = None;

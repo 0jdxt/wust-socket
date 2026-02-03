@@ -42,9 +42,10 @@ impl WebSocketClient {
     }
 
     /// Start a ping loop in a background thread
-    fn start_ping_loop(&self, interval_secs: u64, event_tx: Sender<Event>) {
+    fn start_ping_loop(&self, event_tx: Sender<Event>) {
+        // default to 30s
+        let interval = Duration::from_secs(30);
         let inner = self.inner.clone();
-        let interval = Duration::from_secs(interval_secs);
         thread::spawn(move || loop {
             if inner.closing.load(Ordering::Acquire) {
                 tracing::info!("socket closing, stopping ping loop");
@@ -95,6 +96,9 @@ impl TryFrom<TcpStream> for WebSocketClient {
     type Error = UpgradeError;
 
     fn try_from(mut stream: TcpStream) -> Result<Self> {
+        // store peer_addr
+        let addr = stream.peer_addr().unwrap();
+
         let sec_websocket_key = {
             let mut key_bytes = [0u8; 16];
             rand::fill(&mut key_bytes);
@@ -167,6 +171,8 @@ impl TryFrom<TcpStream> for WebSocketClient {
             }
         }
 
+        tracing::info!(addr = ?addr, "successfully connected to peer");
+
         let (event_tx, event_rx) = channel();
         let stream = reader.into_inner();
         let ws = WebSocket {
@@ -181,7 +187,7 @@ impl TryFrom<TcpStream> for WebSocketClient {
             event_rx,
         };
         ws.start_recv_loop(event_tx.clone());
-        ws.start_ping_loop(30, event_tx.clone());
+        ws.start_ping_loop(event_tx.clone());
         Ok(ws)
     }
 }

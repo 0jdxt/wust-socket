@@ -8,7 +8,7 @@ use std::{
 use crate::{
     frames::{ControlFrame, DataFrame, Opcode},
     protocol::PingStats,
-    role::{RolePolicy},
+    role::RolePolicy,
     CloseReason,
 };
 
@@ -22,7 +22,7 @@ pub(crate) struct ConnInner<R: RolePolicy> {
 }
 
 impl<R: RolePolicy> ConnInner<R> {
-    pub(crate) fn addr(&self) -> Result<SocketAddr> { self.writer.lock().unwrap().local_addr() }
+    pub(crate) fn addr(&self) -> Result<SocketAddr> { self.writer.lock().unwrap().peer_addr() }
 
     // send data (bytes) over the websocket
     pub(crate) fn send(&self, bytes: &[u8], ty: Opcode) -> Result<()> {
