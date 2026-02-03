@@ -14,7 +14,7 @@ use std::{
 
 use base64::engine::{general_purpose::STANDARD as BASE64, Engine};
 
-use crate::{event::Event, inner::InnerTrait, ping::PingStats, role::Client, ws::WebSocket};
+use crate::{inner::InnerTrait, protocol::PingStats, role::Client, ws::WebSocket, Event};
 
 type Result<T> = std::result::Result<T, UpgradeError>;
 pub type WebSocketClient = WebSocket<ClientInner, Client>;

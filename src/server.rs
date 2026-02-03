@@ -8,7 +8,7 @@ use std::{
 
 use base64::engine::{general_purpose::STANDARD as base64, Engine};
 
-use crate::{inner::InnerTrait, ping::PingStats, role::Server, ws::WebSocket, Event, Message};
+use crate::{inner::InnerTrait, protocol::PingStats, role::Server, ws::WebSocket, Event, Message};
 
 pub struct WebSocketServer {
     listener: TcpListener,

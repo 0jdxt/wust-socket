@@ -1,4 +1,4 @@
-use crate::message::Message;
+use crate::protocol::Message;
 
 /// `Event`s are produced by [`WebSocketClient::recv`](crate::WebSocketClient::recv)
 /// and [`WebSocketClient::recv_timeout`](crate::WebSocketClient::recv_timeout)

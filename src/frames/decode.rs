@@ -222,7 +222,7 @@ impl<P: DecodePolicy> FrameDecoder<P> {
 
         // apply mask
         if P::EXPECT_MASKED {
-            crate::mask::mask(&mut payload, self.ctx.mask_key);
+            crate::protocol::mask(&mut payload, self.ctx.mask_key);
         }
 
         if self.ctx.opcode == Opcode::Close && !is_valid_close_payload(&payload) {

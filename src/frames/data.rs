@@ -72,7 +72,7 @@ impl<'a, P: EncodePolicy> DataFrame<'a, P> {
                 // mask bytes
                 let start = buf.len();
                 buf.extend_from_slice(chunk);
-                crate::mask::mask(&mut buf[start..], mask_key);
+                crate::protocol::mask(&mut buf[start..], mask_key);
             } else {
                 buf.extend_from_slice(chunk);
             }

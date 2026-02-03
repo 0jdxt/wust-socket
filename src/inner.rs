@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     frames::{ControlFrame, DataFrame, Opcode},
-    ping::PingStats,
+    protocol::PingStats,
     role::EncodePolicy,
     CloseReason,
 };

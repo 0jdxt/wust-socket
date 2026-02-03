@@ -9,22 +9,18 @@
 
 mod client;
 mod error;
-mod event;
 mod frames;
 mod inner;
-mod mask;
-mod message;
-mod ping;
+mod protocol;
 mod role;
 mod server;
 mod ws;
 
 pub use client::WebSocketClient;
 pub use error::CloseReason;
-pub use event::Event;
-pub use message::Message;
+pub use protocol::Message;
 pub use server::{ServerConn, WebSocketServer};
-pub use ws::WebSocket;
+pub use ws::{Event, WebSocket};
 
 pub(crate) const MAX_FRAME_PAYLOAD: usize = 32 * 1024;
 pub(crate) const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
