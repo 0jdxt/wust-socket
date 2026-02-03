@@ -10,7 +10,6 @@
 mod client;
 mod error;
 mod frames;
-mod inner;
 mod protocol;
 mod role;
 mod server;

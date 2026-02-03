@@ -1,11 +1,11 @@
 use std::sync::{Arc, atomic::Ordering, mpsc::Sender};
 
+use super::ConnInner;
 use crate::{
     CloseReason, Event, MAX_MESSAGE_SIZE,
     frames::{ControlFrame, DecodedFrame, Opcode},
-    inner::ConnInner,
     protocol::{Message, PartialMessage, PongError},
-    role::{RolePolicy},
+    role::RolePolicy,
 };
 
 pub(super) fn handle_frame<P: RolePolicy>(

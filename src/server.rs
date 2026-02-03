@@ -8,7 +8,12 @@ use std::{
 
 use base64::engine::{general_purpose::STANDARD as base64, Engine};
 
-use crate::{inner::ConnInner, protocol::PingStats, role::Server, ws::WebSocket, Event, Message};
+use crate::{
+    protocol::PingStats,
+    role::Server,
+    ws::{ConnInner, WebSocket},
+    Event, Message,
+};
 
 pub type ServerConn = WebSocket<Server>;
 

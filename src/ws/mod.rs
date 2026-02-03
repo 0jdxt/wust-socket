@@ -1,7 +1,8 @@
 mod event;
 mod frame_handler;
-mod recv_loop;
+mod inner;
 mod websocket;
 
 pub use event::Event;
+pub(crate) use inner::ConnInner;
 pub use websocket::WebSocket;

@@ -14,7 +14,12 @@ use std::{
 
 use base64::engine::{general_purpose::STANDARD as BASE64, Engine};
 
-use crate::{inner::ConnInner, protocol::PingStats, role::Client, ws::WebSocket, Event};
+use crate::{
+    protocol::PingStats,
+    role::Client,
+    ws::{ConnInner, WebSocket},
+    Event,
+};
 
 type Result<T> = std::result::Result<T, UpgradeError>;
 
