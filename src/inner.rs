@@ -2,7 +2,6 @@ use std::{
     io::{Result, Write},
     net::{SocketAddr, TcpStream},
     sync::{atomic::AtomicBool, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
@@ -17,7 +16,7 @@ pub trait InnerTrait<P: EncodePolicy> {
     fn closed(&self) -> &AtomicBool;
     fn writer(&self) -> &Mutex<TcpStream>;
     fn reader(&self) -> &Mutex<TcpStream>;
-    fn ping_stats(&self) -> &Mutex<PingStats<5>>;
+    fn ping_stats(&self) -> &Mutex<PingStats>;
 
     fn addr(&self) -> Result<SocketAddr> { self.writer().lock().unwrap().local_addr() }
 
@@ -27,12 +26,7 @@ pub trait InnerTrait<P: EncodePolicy> {
         self.write_chunks(frame.encode())
     }
 
-    // send close request
-    fn close_raw(&self, payload: &[u8]) -> Result<()> {
-        let frame = ControlFrame::<P>::close(payload);
-        self.write_chunks(std::iter::once(frame.encode()))
-    }
-
+    // close with reason code and text
     fn close(&self, reason: CloseReason, text: &'static str) -> Result<()> {
         println!(
             "{}: sending close: {reason:?} {text}",
@@ -45,16 +39,23 @@ pub trait InnerTrait<P: EncodePolicy> {
         self.close_raw(&payload)
     }
 
+    // send close request
+    fn close_raw(&self, payload: &[u8]) -> Result<()> {
+        let bytes = ControlFrame::<P>::close(payload).encode();
+        self.write_once(&bytes)
+    }
+
     // send ping with a timestamp
     fn ping(&self) -> Result<()> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-            .to_be_bytes();
+        // send nonce as payload, store Instant
+        let payload = self.ping_stats().lock().unwrap().new_ping();
+        self.write_once(&ControlFrame::<P>::ping(&payload).encode())
+    }
 
-        let frame = ControlFrame::<P>::ping(&timestamp);
-        self.write_chunks(std::iter::once(frame.encode()))
+    fn write_once(&self, bytes: &[u8]) -> Result<()> {
+        let mut ws = self.writer().lock().unwrap();
+        ws.write_all(bytes)?;
+        ws.flush()
     }
 
     fn write_chunks(&self, chunks: impl IntoIterator<Item = Vec<u8>>) -> Result<()> {

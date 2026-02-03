@@ -14,13 +14,7 @@ use std::{
 
 use base64::engine::{general_purpose::STANDARD as BASE64, Engine};
 
-use crate::{
-    event::Event,
-    inner::InnerTrait,
-    ping::PingStats,
-    role::Client,
-    ws::{Handler, WebSocket},
-};
+use crate::{event::Event, inner::InnerTrait, ping::PingStats, role::Client, ws::WebSocket};
 
 type Result<T> = std::result::Result<T, UpgradeError>;
 pub type WebSocketClient = WebSocket<ClientInner, Client>;
@@ -28,7 +22,7 @@ pub type WebSocketClient = WebSocket<ClientInner, Client>;
 pub struct ClientInner {
     reader: Mutex<TcpStream>,
     writer: Mutex<TcpStream>,
-    ping_stats: Mutex<PingStats<5>>,
+    ping_stats: Mutex<PingStats>,
     closing: AtomicBool,
     closed: AtomicBool,
 }
@@ -42,7 +36,7 @@ impl InnerTrait<Client> for ClientInner {
 
     fn reader(&self) -> &Mutex<TcpStream> { &self.reader }
 
-    fn ping_stats(&self) -> &Mutex<PingStats<5>> { &self.ping_stats }
+    fn ping_stats(&self) -> &Mutex<PingStats> { &self.ping_stats }
 }
 
 impl WebSocketClient {
@@ -58,8 +52,9 @@ impl WebSocketClient {
             .try_into()
     }
 
+    /// Average latency in ms form last 5 pings
     #[must_use]
-    pub fn latency(&self) -> Option<Duration> { self.inner.ping_stats.lock().unwrap().average() }
+    pub fn latency(&self) -> Option<u16> { self.inner.ping_stats.lock().unwrap().average() }
 
     /// Start a ping loop in a background thread
     fn start_ping_loop(&self, interval_secs: u64, event_tx: Sender<Event>) {
@@ -79,9 +74,7 @@ impl WebSocketClient {
         });
     }
 
-    fn start_recv_loop(&self, event_tx: Sender<Event>) {
-        self.recv_loop(event_tx, Handler::<Client>::new());
-    }
+    fn start_recv_loop(&self, event_tx: Sender<Event>) { self.recv_loop(event_tx); }
 }
 
 #[derive(Debug)]

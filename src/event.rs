@@ -5,7 +5,7 @@ use crate::message::Message;
 #[derive(Debug)]
 pub enum Event {
     /// Pong event with its latency in milliseconds.
-    Pong(u64),
+    Pong(u16),
     /// A text or binary message.
     Message(Message),
     /// The connection to the websocket has been closed.

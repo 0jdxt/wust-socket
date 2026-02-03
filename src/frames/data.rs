@@ -80,8 +80,7 @@ impl<'a, P: EncodePolicy> DataFrame<'a, P> {
             chunks.push(buf);
         }
 
-        let n: usize = chunks.iter().map(Vec::len).sum();
-        tracing::info!(len = n, "{role} encoded DATA");
+        tracing::info!(len = self.payload.len(), "{role} encoded DATA");
         chunks
     }
 }

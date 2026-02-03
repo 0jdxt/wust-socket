@@ -1,5 +1,5 @@
 use std::{
-    io::{Read, Result, Write},
+    io::{Read, Result},
     marker::PhantomData,
     sync::{
         Arc,
@@ -7,7 +7,7 @@ use std::{
         mpsc::{Receiver, Sender},
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use crate::{
@@ -15,6 +15,7 @@ use crate::{
     frames::{ControlFrame, DecodedFrame, FrameDecoder, FrameParseError, FrameState, Opcode},
     inner::InnerTrait,
     message::{Message, PartialMessage},
+    ping::PongError,
     role::{DecodePolicy, EncodePolicy},
 };
 
@@ -68,11 +69,7 @@ impl<I: InnerTrait<R> + Send + Sync, R: EncodePolicy + DecodePolicy> WebSocket<I
         self.event_rx.recv_timeout(timeout).ok()
     }
 
-    pub(crate) fn recv_loop<H: FrameHandler<R, I> + Send + 'static>(
-        &self,
-        event_tx: Sender<Event>,
-        handler: H,
-    ) {
+    pub(crate) fn recv_loop(&self, event_tx: Sender<Event>) {
         let inner = Arc::clone(&self.inner);
         thread::spawn(move || {
             let mut buf = vec![0; MAX_FRAME_PAYLOAD];
@@ -93,11 +90,11 @@ impl<I: InnerTrait<R> + Send + Sync, R: EncodePolicy + DecodePolicy> WebSocket<I
                             tracing::info!("TCP FIN");
                             break;
                         }
+                        Ok(n) => n,
                         Err(e) => {
                             tracing::warn!(error = ?e, "reader error");
                             break;
                         }
-                        Ok(n) => n,
                     }
                 };
                 tracing::trace!(bytes = n, "read socket");
@@ -106,10 +103,7 @@ impl<I: InnerTrait<R> + Send + Sync, R: EncodePolicy + DecodePolicy> WebSocket<I
                 loop {
                     match fd.next_frame() {
                         Ok(Some(FrameState::Complete(frame))) => {
-                            if handler
-                                .handle_frame(frame, &inner, &mut partial_msg, &event_tx)
-                                .is_none()
-                            {
+                            if handle_frame(&frame, &inner, &mut partial_msg, &event_tx).is_none() {
                                 // finished processing frames for now
                                 // if the connection is closing, just read and discard until FIN
                                 inner.closing().store(true, Ordering::Release);
@@ -152,130 +146,139 @@ impl<I: InnerTrait<R> + Send + Sync, R: EncodePolicy + DecodePolicy> WebSocket<I
     }
 }
 
-pub(crate) trait FrameHandler<P: EncodePolicy, I: InnerTrait<P>> {
-    fn handle_frame(
-        &self,
-        frame: DecodedFrame,
-        inner: &Arc<I>,
-        partial_msg: &mut Option<PartialMessage>,
-        event_tx: &Sender<Event>,
-    ) -> Option<()>;
+fn handle_frame<P: EncodePolicy, I: InnerTrait<P>>(
+    frame: &DecodedFrame,
+    inner: &Arc<I>,
+    partial_msg: &mut Option<PartialMessage>,
+    event_tx: &Sender<Event>,
+) -> Option<()> {
+    match frame.opcode {
+        // Try to parse payload as nonce and check it matches,
+        // otherwise if latency exceeds u16::MAX ms, we close the connection
+        // else its unsolicited and we ignore
+        Opcode::Pong => handle_pong(frame, inner, event_tx),
+        // Reply with pong
+        Opcode::Ping => handle_ping(frame, inner),
+        // Build message out of frames
+        Opcode::Text | Opcode::Bin | Opcode::Cont => {
+            handle_message(frame, partial_msg, inner, event_tx)?;
+        }
+        // If closing, shutdown; otherwise, reply with close frame
+        Opcode::Close => {
+            handle_close(frame, inner, event_tx);
+            return None;
+        }
+    }
+    Some(())
 }
 
-pub(crate) struct Handler<P: EncodePolicy + DecodePolicy> {
-    _p: PhantomData<P>,
+fn handle_ping<P, I>(frame: &DecodedFrame, inner: &Arc<I>)
+where
+    P: EncodePolicy,
+    I: InnerTrait<P>,
+{
+    tracing::debug!("received PING, scheduling PONG");
+    let bytes = ControlFrame::<P>::pong(&frame.payload).encode();
+    let _ = inner.write_once(&bytes);
 }
-impl<P: EncodePolicy + DecodePolicy> Handler<P> {
-    pub(crate) fn new() -> Self { Self { _p: PhantomData } }
-}
-impl<P: DecodePolicy + EncodePolicy, I: InnerTrait<P>> FrameHandler<P, I> for Handler<P> {
-    fn handle_frame(
-        &self,
-        frame: DecodedFrame,
-        inner: &Arc<I>,
-        partial_msg: &mut Option<PartialMessage>,
-        event_tx: &Sender<Event>,
-    ) -> Option<()> {
-        let role = if P::MASK_OUTGOING { "CLI" } else { "SRV" };
-        match frame.opcode {
-            // If unsolicited, ignore; otherwise, parse timestamp and calculate latency
-            Opcode::Pong => {
-                // try to parse payload as timestamp,
-                // otherwise its unsolicited and we ignore
-                tracing::debug!("received PONG");
-                if let Ok(bytes) = frame.payload.try_into() {
-                    let sent = u128::from_be_bytes(bytes);
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis();
 
-                    // assume anomalous if latency > u64::MAX
-                    if let Ok(latency) = u64::try_from(now - sent) {
-                        inner
-                            .ping_stats()
-                            .lock()
-                            .unwrap()
-                            .add(Duration::from_millis(latency));
-
-                        let _ = event_tx.send(Event::Pong(latency));
-                    }
-                }
+fn handle_pong<P: EncodePolicy, I: InnerTrait<P>>(
+    frame: &DecodedFrame,
+    inner: &Arc<I>,
+    event_tx: &Sender<Event>,
+) {
+    tracing::debug!("received PONG");
+    if let Ok(bytes) = frame.payload.as_slice().try_into() {
+        let nonce = u16::from_be_bytes(bytes);
+        match inner.ping_stats().lock().unwrap().on_pong(nonce) {
+            Ok(latency) => {
+                let _ = event_tx.send(Event::Pong(latency));
             }
-            // Reply with pong
-            Opcode::Ping => {
-                tracing::debug!("received PING, scheduling PONG");
-                let bytes = ControlFrame::<P>::pong(&frame.payload).encode();
-                let mut ws = inner.writer().lock().unwrap();
-                let _ = ws.write_all(&bytes);
+            Err(PongError::Late(latency)) => {
+                tracing::warn!(latency = latency, "late pong");
+                let _ = inner.close(CloseReason::Policy, "ping timeout");
             }
-            // Build message out of frames
-            Opcode::Text | Opcode::Bin | Opcode::Cont => {
-                // TODO: Leniency
-                // allow overwriting partial messages
-                // if we get a new TEXT or BINARY
-                tracing::trace!("{role} {}, {:?}", partial_msg.is_some(), frame.opcode);
-                let partial = match (partial_msg.as_mut(), frame.opcode) {
-                    (None, Opcode::Text) => partial_msg.insert(PartialMessage::Text(vec![])),
-                    (None, Opcode::Bin) => partial_msg.insert(PartialMessage::Binary(vec![])),
-                    (Some(p), Opcode::Cont) => p,
-                    _ => {
-                        // if we get a CONT before TEXT or BINARY
-                        // or we get TEXT/BINARY without finishing the last message
-                        // close the connection
-                        let _ = inner.close(CloseReason::ProtoError, "Unexpected frame");
-                        return None;
-                    }
-                };
-
-                if partial.len() + frame.payload.len() > MAX_MESSAGE_SIZE {
-                    let _ = inner.close(CloseReason::TooBig, "Message exceeded maximum size");
-                    return None;
-                }
-
-                partial.push_bytes(&frame.payload);
-                tracing::trace!(
-                    current_len = partial.len(),
-                    added = frame.payload.len(),
-                    "message fragment appended"
-                );
-
-                if frame.is_fin {
-                    let msg = match partial_msg.take().unwrap() {
-                        PartialMessage::Binary(buf) => Message::Binary(buf),
-                        PartialMessage::Text(buf) => {
-                            // if invalid UTF-8 immediately close connection
-                            if let Ok(s) = String::from_utf8(buf) {
-                                Message::Text(s)
-                            } else {
-                                let _ = inner.close(CloseReason::DataError, "Invalid UTF-8");
-                                return None;
-                            }
-                        }
-                    };
-                    tracing::debug!(
-                        opcode = ?frame.opcode,
-                        total_len = msg.len(),
-                        "message assembly complete"
-                    );
-                    let _ = event_tx.send(Event::Message(msg));
-                }
-            }
-            // If closing, shutdown; otherwise, reply with close frame
-            Opcode::Close => {
-                let code = CloseReason::from([frame.payload[0], frame.payload[1]]);
-                tracing::info!(reason=?code, "recieved Close frame");
-                // if not already closing try to send close frame, log err
-                if !inner.closing().swap(true, Ordering::AcqRel)
-                    && let Err(e) = inner.close_raw(&frame.payload)
-                {
-                    tracing::warn!("{role} Err: error sending close: {e}");
-                    let _ = event_tx.send(Event::Error(e));
-                }
-
-                return None;
+            Err(PongError::Nonce(expected)) => {
+                tracing::warn!(got = nonce, expected = expected, "mismatched pong nonce");
             }
         }
-        Some(())
     }
+}
+
+fn handle_close<P: EncodePolicy, I: InnerTrait<P>>(
+    frame: &DecodedFrame,
+    inner: &Arc<I>,
+    event_tx: &Sender<Event>,
+) {
+    let code = CloseReason::from([frame.payload[0], frame.payload[1]]);
+    tracing::info!(reason=?code, "recieved Close frame");
+    // if not already closing try to send close frame, log err
+    if !inner.closing().swap(true, Ordering::AcqRel)
+        && let Err(e) = inner.close_raw(&frame.payload)
+    {
+        tracing::warn!("Err: error sending close: {e}");
+        let _ = event_tx.send(Event::Error(e));
+    }
+}
+
+fn handle_message<P: EncodePolicy, I: InnerTrait<P>>(
+    frame: &DecodedFrame,
+    partial_msg: &mut Option<PartialMessage>,
+    inner: &Arc<I>,
+    event_tx: &Sender<Event>,
+) -> Option<()> {
+    // TODO: Leniency
+    // allow overwriting partial messages
+    // if we get a new TEXT or BINARY
+    tracing::trace!(
+        partial = partial_msg.is_some(),
+        opcode = ?frame.opcode,
+        "handling message"
+    );
+    let partial = match (partial_msg.as_mut(), frame.opcode) {
+        (None, Opcode::Text) => partial_msg.insert(PartialMessage::Text(vec![])),
+        (None, Opcode::Bin) => partial_msg.insert(PartialMessage::Binary(vec![])),
+        (Some(p), Opcode::Cont) => p,
+        _ => {
+            // if we get a CONT before TEXT or BINARY
+            // or we get TEXT/BINARY without finishing the last message
+            // close the connection
+            let _ = inner.close(CloseReason::ProtoError, "Unexpected frame");
+            return None;
+        }
+    };
+
+    if partial.len() + frame.payload.len() > MAX_MESSAGE_SIZE {
+        let _ = inner.close(CloseReason::TooBig, "Message exceeded maximum size");
+        return None;
+    }
+
+    partial.push_bytes(&frame.payload);
+    tracing::trace!(
+        current_len = partial.len(),
+        added = frame.payload.len(),
+        "message fragment appended"
+    );
+
+    if frame.is_fin {
+        let msg = match partial_msg.take().unwrap() {
+            PartialMessage::Binary(buf) => Message::Binary(buf),
+            PartialMessage::Text(buf) => {
+                // if invalid UTF-8 immediately close connection
+                if let Ok(s) = String::from_utf8(buf) {
+                    Message::Text(s)
+                } else {
+                    let _ = inner.close(CloseReason::DataError, "Invalid UTF-8");
+                    return None;
+                }
+            }
+        };
+        tracing::debug!(
+            opcode = ?frame.opcode,
+            total_len = msg.len(),
+            "message assembly complete"
+        );
+        let _ = event_tx.send(Event::Message(msg));
+    }
+    Some(())
 }

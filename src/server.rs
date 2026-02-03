@@ -8,13 +8,7 @@ use std::{
 
 use base64::engine::{general_purpose::STANDARD as base64, Engine};
 
-use crate::{
-    inner::InnerTrait,
-    ping::PingStats,
-    role::Server,
-    ws::{Handler, WebSocket},
-    Event, Message,
-};
+use crate::{inner::InnerTrait, ping::PingStats, role::Server, ws::WebSocket, Event, Message};
 
 pub struct WebSocketServer {
     listener: TcpListener,
@@ -29,7 +23,7 @@ impl ServerConn {
 pub struct ServerConnInner {
     reader: Mutex<TcpStream>,
     writer: Mutex<TcpStream>,
-    ping_stats: Mutex<PingStats<5>>,
+    ping_stats: Mutex<PingStats>,
     closed: AtomicBool,
     closing: AtomicBool,
 }
@@ -39,7 +33,7 @@ impl InnerTrait<Server> for ServerConnInner {
 
     fn reader(&self) -> &Mutex<TcpStream> { &self.reader }
 
-    fn ping_stats(&self) -> &Mutex<PingStats<5>> { &self.ping_stats }
+    fn ping_stats(&self) -> &Mutex<PingStats> { &self.ping_stats }
 
     fn closed(&self) -> &AtomicBool { &self.closed }
 
@@ -58,7 +52,7 @@ impl WebSocketServer {
             let ws: ServerConn = stream?.try_into().unwrap();
             tracing::info!(addr = ws.inner.addr()?.to_string(), "SVR: client connected");
             let (event_tx, event_rx) = channel();
-            ws.recv_loop(event_tx, Handler::new());
+            ws.recv_loop(event_tx);
             ws.ping()?;
 
             // Spawn a thread to handle events from this client
@@ -83,7 +77,7 @@ impl WebSocketServer {
                             eprintln!("SVR: client error {e:?}");
                         }
                         Event::Pong(latency) => {
-                            println!("SVR: pong latency {latency}ms");
+                            tracing::info!("SVR: pong latency {latency}ms");
                         }
                     }
                 }

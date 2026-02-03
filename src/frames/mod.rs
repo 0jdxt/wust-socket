@@ -1,7 +1,6 @@
 mod control;
 mod data;
 mod decode;
-mod frame;
 mod opcode;
 
 pub(crate) use control::ControlFrame;
