@@ -16,7 +16,8 @@ struct Args {
     port: u16,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env().add_directive("wust_socket=info".parse().unwrap()),
@@ -27,8 +28,8 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let server = WebSocketServer::bind((args.addr.as_str(), args.port))?;
-    server.run()?;
+    let server = WebSocketServer::bind((args.addr.as_str(), args.port)).await?;
+    server.run().await?;
 
     Ok(())
 }

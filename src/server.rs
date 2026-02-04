@@ -1,18 +1,21 @@
 use std::{
-    io::{Error, Read, Result, Write},
+    io::Result,
     marker::PhantomData,
-    net::{TcpListener, TcpStream, ToSocketAddrs},
-    sync::{atomic::AtomicBool, mpsc::channel, Arc, Mutex},
-    thread,
+    sync::{Arc, atomic::AtomicBool},
 };
 
-use base64::engine::{general_purpose::STANDARD as base64, Engine};
+use base64::engine::{Engine, general_purpose::STANDARD as base64};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream, ToSocketAddrs},
+    sync::{Mutex, mpsc::channel},
+};
 
 use crate::{
+    Event, Message,
     protocol::PingStats,
     role::Server,
     ws::{ConnInner, WebSocket},
-    Event, Message,
 };
 
 pub type ServerConn = WebSocket<Server>;
@@ -22,32 +25,29 @@ pub struct WebSocketServer {
 }
 
 impl WebSocketServer {
-    pub fn bind(addr: impl ToSocketAddrs) -> Result<Self> {
-        let listener = TcpListener::bind(addr)?;
+    pub async fn bind(addr: impl ToSocketAddrs) -> Result<Self> {
+        let listener = TcpListener::bind(addr).await?;
         tracing::info!(addr = listener.local_addr()?.to_string(), "Listening on");
         Ok(Self { listener })
     }
 
-    pub fn run(&self) -> Result<()> {
-        for stream in self.listener.incoming() {
-            let stream = stream?;
-            thread::spawn(move || {
-                let ws: ServerConn = stream.try_into().unwrap();
-                let (event_tx, event_rx) = channel();
-                ws.recv_loop(event_tx);
-                let _ = ws.ping();
+    pub async fn run(&self) -> Result<()> {
+        while let Ok((stream, _addr)) = self.listener.accept().await {
+            tokio::task::spawn(async move {
+                let mut ws = ServerConn::from_stream(stream).await.unwrap();
+                ws.ping().await.unwrap();
 
                 // Spawn a thread to handle events from this client
-                for event in event_rx {
+                while let Some(event) = ws.event_rx.recv().await {
                     match event {
                         Event::Message(msg) => match msg {
                             Message::Text(s) => {
                                 println!("got message T {}", s.len());
-                                ws.send_text(&s).unwrap();
+                                ws.send_text(&s).await.unwrap();
                             }
                             Message::Binary(b) => {
                                 println!("got messsage B {}", b.len());
-                                ws.send_bytes(&b).unwrap();
+                                ws.send_bytes(&b).await.unwrap();
                             }
                         },
                         Event::Closed => {
@@ -68,12 +68,10 @@ impl WebSocketServer {
     }
 }
 
-impl TryFrom<TcpStream> for ServerConn {
-    type Error = Error;
-
-    fn try_from(mut stream: TcpStream) -> std::result::Result<Self, Self::Error> {
+impl ServerConn {
+    async fn from_stream(mut stream: TcpStream) -> std::result::Result<Self, std::io::Error> {
         let mut buf = [0; 1024];
-        let n = stream.read(&mut buf).unwrap();
+        let n = stream.read(&mut buf).await?;
         let request = String::from_utf8_lossy(&buf[..n]);
 
         // Extract Sec-WebSocket-Key
@@ -98,21 +96,23 @@ impl TryFrom<TcpStream> for ServerConn {
              Sec-WebSocket-Accept: {accept_key}\r\n\r\n",
         );
 
-        stream.write_all(response.as_bytes()).unwrap();
+        stream.write_all(response.as_bytes()).await?;
 
         tracing::info!(addr = ?stream.peer_addr().unwrap(), "upgraded client");
+        let (reader, writer) = stream.into_split();
 
-        let (_, event_rx) = channel();
-        Ok(Self {
+        let (event_tx, event_rx) = channel(64);
+        let ws = Self {
             inner: Arc::new(ConnInner {
-                reader: Mutex::new(stream.try_clone()?),
-                writer: Mutex::new(stream),
+                writer: Mutex::new(writer),
                 ping_stats: Mutex::new(PingStats::new()),
                 closed: AtomicBool::new(false),
                 closing: AtomicBool::new(false),
                 _role: PhantomData,
             }),
             event_rx,
-        })
+        };
+        ws.recv_loop(reader, event_tx);
+        Ok(ws)
     }
 }

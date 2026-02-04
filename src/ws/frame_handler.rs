@@ -1,4 +1,6 @@
-use std::sync::{Arc, atomic::Ordering, mpsc::Sender};
+use std::sync::{Arc, atomic::Ordering};
+
+use tokio::sync::mpsc::Sender;
 
 use super::ConnInner;
 use crate::{
@@ -8,20 +10,20 @@ use crate::{
     role::RolePolicy,
 };
 
-pub(super) fn handle_frame<P: RolePolicy>(
+pub(super) async fn handle_frame<P: RolePolicy>(
     frame: &DecodedFrame,
     inner: &Arc<ConnInner<P>>,
     partial_msg: &mut Option<PartialMessage>,
     event_tx: &Sender<Event>,
 ) -> Option<()> {
     match frame.opcode {
-        Opcode::Pong => handle_pong(frame, inner, event_tx),
-        Opcode::Ping => handle_ping(frame, inner),
+        Opcode::Pong => handle_pong(frame, inner, event_tx).await,
+        Opcode::Ping => handle_ping(frame, inner).await,
         Opcode::Text | Opcode::Bin | Opcode::Cont => {
-            handle_message(frame, partial_msg, inner, event_tx)?;
+            handle_message(frame, partial_msg, inner, event_tx).await?;
         }
         Opcode::Close => {
-            handle_close(frame, inner, event_tx);
+            handle_close(frame, inner, event_tx).await;
             return None;
         }
     }
@@ -29,29 +31,29 @@ pub(super) fn handle_frame<P: RolePolicy>(
 }
 
 // Reply with pong
-fn handle_ping<R: RolePolicy>(frame: &DecodedFrame, inner: &Arc<ConnInner<R>>) {
+async fn handle_ping<R: RolePolicy>(frame: &DecodedFrame, inner: &Arc<ConnInner<R>>) {
     tracing::info!("received PING, scheduling PONG");
     let bytes = ControlFrame::<R>::pong(&frame.payload).encode();
-    let _ = inner.write_once(&bytes);
+    let _ = inner.write_once(&bytes).await;
 }
 
 // Try to parse payload as nonce and check it matches,
 // otherwise if latency exceeds u16::MAX ms, we close the connection
 // else its unsolicited and we ignore
-fn handle_pong<R: RolePolicy>(
+async fn handle_pong<R: RolePolicy>(
     frame: &DecodedFrame,
     inner: &Arc<ConnInner<R>>,
     event_tx: &Sender<Event>,
 ) {
     tracing::debug!("received PONG");
     if let Ok(bytes) = frame.payload.as_slice().try_into() {
-        match inner.ping_stats.lock().unwrap().on_pong(bytes) {
+        match inner.ping_stats.lock().await.on_pong(bytes) {
             Ok(latency) => {
-                let _ = event_tx.send(Event::Pong(latency));
+                let _ = event_tx.send(Event::Pong(latency)).await;
             }
             Err(PongError::Late(latency)) => {
                 tracing::warn!(latency = latency, "late pong");
-                let _ = inner.close(CloseReason::Policy, "ping timeout");
+                let _ = inner.close(CloseReason::Policy, "ping timeout").await;
             }
             Err(PongError::Nonce(expected)) => {
                 tracing::warn!(
@@ -65,7 +67,7 @@ fn handle_pong<R: RolePolicy>(
 }
 
 // If closing, shutdown; otherwise, reply with close frame
-fn handle_close<R: RolePolicy>(
+async fn handle_close<R: RolePolicy>(
     frame: &DecodedFrame,
     inner: &Arc<ConnInner<R>>,
     event_tx: &Sender<Event>,
@@ -74,15 +76,15 @@ fn handle_close<R: RolePolicy>(
     tracing::info!(reason=?code, "recieved Close frame");
     // if not already closing try to send close frame, log err
     if !inner.closing.swap(true, Ordering::AcqRel)
-        && let Err(e) = inner.close_raw(&frame.payload)
+        && let Err(e) = inner.close_raw(&frame.payload).await
     {
         tracing::warn!("Err: error sending close: {e}");
-        let _ = event_tx.send(Event::Error(e));
+        let _ = event_tx.send(Event::Error(e)).await;
     }
 }
 
 // Build message out of frames
-fn handle_message<R: RolePolicy>(
+async fn handle_message<R: RolePolicy>(
     frame: &DecodedFrame,
     partial_msg: &mut Option<PartialMessage>,
     inner: &Arc<ConnInner<R>>,
@@ -104,13 +106,17 @@ fn handle_message<R: RolePolicy>(
             // if we get a CONT before TEXT or BINARY
             // or we get TEXT/BINARY without finishing the last message
             // close the connection
-            let _ = inner.close(CloseReason::ProtoError, "Unexpected frame");
+            let _ = inner
+                .close(CloseReason::ProtoError, "Unexpected frame")
+                .await;
             return None;
         }
     };
 
     if partial.len() + frame.payload.len() > MAX_MESSAGE_SIZE {
-        let _ = inner.close(CloseReason::TooBig, "Message exceeded maximum size");
+        let _ = inner
+            .close(CloseReason::TooBig, "Message exceeded maximum size")
+            .await;
         return None;
     }
 
@@ -129,7 +135,7 @@ fn handle_message<R: RolePolicy>(
                 if let Ok(s) = String::from_utf8(buf) {
                     Message::Text(s)
                 } else {
-                    let _ = inner.close(CloseReason::DataError, "Invalid UTF-8");
+                    let _ = inner.close(CloseReason::DataError, "Invalid UTF-8").await;
                     return None;
                 }
             }
@@ -139,7 +145,7 @@ fn handle_message<R: RolePolicy>(
             total_len = msg.len(),
             "message assembly complete"
         );
-        let _ = event_tx.send(Event::Message(msg));
+        let _ = event_tx.send(Event::Message(msg)).await;
     }
     Some(())
 }

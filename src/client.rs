@@ -1,13 +1,17 @@
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Write},
     marker::PhantomData,
-    net::{SocketAddr, TcpStream, ToSocketAddrs},
-    sync::{atomic::AtomicBool, mpsc::channel, Arc, Mutex},
+    net::SocketAddr,
+    sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
 
-use base64::engine::{general_purpose::STANDARD as BASE64, Engine};
+use base64::engine::{Engine, general_purpose::STANDARD as BASE64};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{TcpStream, ToSocketAddrs},
+    sync::{Mutex, mpsc::channel},
+};
 
 use crate::{
     protocol::PingStats,
@@ -18,23 +22,6 @@ use crate::{
 type Result<T> = std::result::Result<T, UpgradeError>;
 
 pub type WebSocketClient = WebSocket<Client>;
-
-/// Client connection implementation for WebSocket
-impl WebSocketClient {
-    /// Attempts to connect to socket and upgrade connection.
-    pub fn connect(addr: impl ToSocketAddrs) -> Result<Self> {
-        TcpStream::connect(addr)
-            .map_err(|_| UpgradeError::Connect)?
-            .try_into()
-    }
-
-    /// Attempts to connect to socket and upgrade connection, with timeout.
-    pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> Result<Self> {
-        TcpStream::connect_timeout(addr, timeout)
-            .map_err(|_| UpgradeError::Connect)?
-            .try_into()
-    }
-}
 
 /// Errors that can occur when upgrading a TCP stream to a WebSocket.
 #[derive(Debug)]
@@ -61,14 +48,32 @@ pub enum UpgradeError {
     Addr,
     /// Failed to establish TCP connection.
     Connect,
+    /// Attempt to connect timed out.
+    Timeout,
 }
 
-/// Takes a [`TcpStream`] and attempts to upgrade the connection to WS.
-impl TryFrom<TcpStream> for WebSocketClient {
-    /// Returns [`std::io::Error`] if unable to read from or write to the [`TcpStream`], or if there was a handshake failure whilst upgrading the connection.
-    type Error = UpgradeError;
+/// Client connection implementation for WebSocket
+impl WebSocketClient {
+    /// Attempts to connect to socket and upgrade connection.
+    pub async fn connect(addr: impl ToSocketAddrs) -> Result<Self> {
+        Self::from_stream(
+            TcpStream::connect(addr)
+                .await
+                .map_err(|_| UpgradeError::Connect)?,
+        )
+        .await
+    }
 
-    fn try_from(mut stream: TcpStream) -> Result<Self> {
+    /// Attempts to connect to socket and upgrade connection, with timeout.
+    pub async fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> Result<Self> {
+        let fut = Self::connect(addr);
+        match tokio::time::timeout(timeout, fut).await {
+            Ok(Ok(s)) => Ok(s),
+            _ => Err(UpgradeError::Timeout),
+        }
+    }
+
+    async fn from_stream(mut stream: TcpStream) -> Result<Self> {
         // store peer_addr
         let addr = stream.peer_addr().unwrap();
 
@@ -90,6 +95,7 @@ impl TryFrom<TcpStream> for WebSocketClient {
         // send upgrade request
         stream
             .write_all(req.as_bytes())
+            .await
             .map_err(|_| UpgradeError::Write)?;
 
         // get status line and validate status code
@@ -97,6 +103,7 @@ impl TryFrom<TcpStream> for WebSocketClient {
         let mut status_line = String::new();
         reader
             .read_line(&mut status_line)
+            .await
             .map_err(|_| UpgradeError::Read)?;
 
         let mut status_parts = status_line.split_whitespace();
@@ -110,6 +117,7 @@ impl TryFrom<TcpStream> for WebSocketClient {
             let mut line = String::new();
             reader
                 .read_line(&mut line)
+                .await
                 .map_err(|_| UpgradeError::Read)?;
             let line = line.trim_end(); // remove \r\n
             if line.is_empty() {
@@ -146,12 +154,11 @@ impl TryFrom<TcpStream> for WebSocketClient {
 
         tracing::info!(addr = ?addr, "successfully connected to peer");
 
-        let (event_tx, event_rx) = channel();
-        let stream = reader.into_inner();
+        let (event_tx, event_rx) = channel(64);
+        let (reader, writer) = reader.into_inner().into_split();
         let ws = WebSocket {
             inner: Arc::new(ConnInner {
-                reader: Mutex::new(stream.try_clone().map_err(|_| UpgradeError::Read)?),
-                writer: Mutex::new(stream),
+                writer: Mutex::new(writer),
                 ping_stats: Mutex::new(PingStats::new()),
                 closing: AtomicBool::new(false),
                 closed: AtomicBool::new(false),
@@ -159,7 +166,7 @@ impl TryFrom<TcpStream> for WebSocketClient {
             }),
             event_rx,
         };
-        ws.recv_loop(event_tx.clone());
+        ws.recv_loop(reader, event_tx.clone());
         ws.ping_loop(30, event_tx.clone());
         Ok(ws)
     }

@@ -23,7 +23,8 @@ struct Args {
     port: u16,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env().add_directive("wust_socket=info".parse().unwrap()),
@@ -42,12 +43,14 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     for _ in 0..2 {
-        let mut ws = WebSocketClient::connect((args.addr.as_str(), args.port)).expect("connect");
+        let mut ws = WebSocketClient::connect((args.addr.as_str(), args.port))
+            .await
+            .expect("connect");
 
-        ws.send_text(&data)?;
-        ws.send_text(LOREM)?;
+        ws.send_text(&data).await?;
+        ws.send_text(LOREM).await?;
 
-        while let Some(e) = ws.recv_timeout(Duration::from_millis(50)) {
+        while let Some(e) = ws.recv_timeout(Duration::from_millis(50)).await {
             match e {
                 Event::Closed => {
                     println!("connection closed");
@@ -59,7 +62,9 @@ fn main() -> Result<()> {
             }
         }
 
-        ws.close()?;
+        println!("timed out");
+
+        ws.close().await?;
         // wait for close/tcp fin
         thread::sleep(Duration::from_millis(100));
     }
