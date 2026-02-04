@@ -1,11 +1,13 @@
 use std::time::Instant;
 
-// Stores and calculates average of last N latencies
 const N: usize = 5;
+const NONCE_LEN: usize = 8;
+
+// Stores and calculates average of last N latencies
 pub struct PingStats {
     history: [Option<u16>; N],
     idx: usize,
-    last_nonce: u16,
+    last_nonce: [u8; NONCE_LEN],
     last_ping: Instant,
 }
 
@@ -14,18 +16,20 @@ impl PingStats {
         Self {
             history: [None; N],
             idx: 0,
-            last_nonce: 0,
+            last_nonce: [0; NONCE_LEN],
             last_ping: Instant::now(),
         }
     }
 
-    pub(crate) fn new_ping(&mut self) -> [u8; 2] {
+    pub(crate) fn new_ping(&mut self) -> &[u8; NONCE_LEN] {
         self.last_ping = Instant::now();
-        self.last_nonce += 1;
-        self.last_nonce.to_be_bytes()
+        let mut buf = [0; NONCE_LEN];
+        rand::fill(&mut buf);
+        self.last_nonce = buf;
+        &self.last_nonce
     }
 
-    pub(crate) fn on_pong(&mut self, nonce: u16) -> Result<u16, PongError> {
+    pub(crate) fn on_pong(&mut self, nonce: [u8; NONCE_LEN]) -> Result<u16, PongError> {
         if nonce == self.last_nonce {
             let latency_ms = self.last_ping.elapsed().as_millis();
             let latency = u16::try_from(latency_ms).map_err(|_| PongError::Late(latency_ms))?;
@@ -55,6 +59,6 @@ impl PingStats {
 }
 
 pub(crate) enum PongError {
-    Nonce(u16),
+    Nonce([u8; NONCE_LEN]),
     Late(u128),
 }

@@ -49,8 +49,9 @@ impl<R: RolePolicy> ConnInner<R> {
     // send ping with a timestamp
     pub(crate) fn ping(&self) -> Result<()> {
         // send nonce as payload, store Instant
-        let payload = self.ping_stats.lock().unwrap().new_ping();
-        self.write_once(&ControlFrame::<R>::ping(&payload).encode())
+        let mut stats = self.ping_stats.lock().unwrap();
+        let payload = stats.new_ping();
+        self.write_once(&ControlFrame::<R>::ping(payload).encode())
     }
 
     pub(crate) fn write_once(&self, bytes: &[u8]) -> Result<()> {

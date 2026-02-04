@@ -30,7 +30,7 @@ pub(super) fn handle_frame<P: RolePolicy>(
 
 // Reply with pong
 fn handle_ping<R: RolePolicy>(frame: &DecodedFrame, inner: &Arc<ConnInner<R>>) {
-    tracing::debug!("received PING, scheduling PONG");
+    tracing::info!("received PING, scheduling PONG");
     let bytes = ControlFrame::<R>::pong(&frame.payload).encode();
     let _ = inner.write_once(&bytes);
 }
@@ -45,8 +45,7 @@ fn handle_pong<R: RolePolicy>(
 ) {
     tracing::debug!("received PONG");
     if let Ok(bytes) = frame.payload.as_slice().try_into() {
-        let nonce = u16::from_be_bytes(bytes);
-        match inner.ping_stats.lock().unwrap().on_pong(nonce) {
+        match inner.ping_stats.lock().unwrap().on_pong(bytes) {
             Ok(latency) => {
                 let _ = event_tx.send(Event::Pong(latency));
             }
@@ -55,7 +54,11 @@ fn handle_pong<R: RolePolicy>(
                 let _ = inner.close(CloseReason::Policy, "ping timeout");
             }
             Err(PongError::Nonce(expected)) => {
-                tracing::warn!(got = nonce, expected = expected, "mismatched pong nonce");
+                tracing::warn!(
+                    got = ?bytes,
+                    expected = ?expected,
+                    "mismatched pong nonce"
+                );
             }
         }
     }
