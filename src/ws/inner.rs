@@ -32,10 +32,7 @@ impl<R: RolePolicy> ConnInner<R> {
 
     // close with reason code and text
     pub(crate) fn close(&self, reason: CloseReason, text: &'static str) -> Result<()> {
-        println!(
-            "{}: sending close: {reason:?} {text}",
-            if R::MASK_OUTGOING { "CLI" } else { "SRV" }
-        );
+        tracing::info!(reason = ?reason, "sending close");
         let code: [u8; 2] = reason.into();
         let mut payload = Vec::with_capacity(2 + text.len());
         payload.extend_from_slice(&code);

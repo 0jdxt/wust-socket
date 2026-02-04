@@ -50,12 +50,12 @@ fn main() -> Result<()> {
         while let Some(e) = ws.recv_timeout(Duration::from_millis(50)) {
             match e {
                 Event::Closed => {
-                    println!("CLI connection closed");
+                    println!("connection closed");
                     break;
                 }
-                Event::Pong(n) => println!("CLI PONG: {n}ms"),
-                Event::Message(m) => println!("CLI MESSAGE: {}", m.as_str().unwrap().len()),
-                Event::Error(e) => println!("CLI ERR: {e}"),
+                Event::Pong(n) => println!("PONG: {n}ms"),
+                Event::Message(m) => println!("MESSAGE: {}", m.as_str().unwrap().len()),
+                Event::Error(e) => println!("ERR: {e}"),
             }
         }
 

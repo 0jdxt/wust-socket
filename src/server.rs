@@ -42,23 +42,23 @@ impl WebSocketServer {
                     match event {
                         Event::Message(msg) => match msg {
                             Message::Text(s) => {
-                                println!("SVR: got message T {}", s.len());
+                                println!("got message T {}", s.len());
                                 ws.send_text(&s).unwrap();
                             }
                             Message::Binary(b) => {
-                                println!("SVR: got messsage B {}", b.len());
+                                println!("got messsage B {}", b.len());
                                 ws.send_bytes(&b).unwrap();
                             }
                         },
                         Event::Closed => {
-                            println!("SVR: client closed");
+                            println!("client closed");
                             break;
                         }
                         Event::Error(e) => {
-                            eprintln!("SVR: client error {e:?}");
+                            eprintln!("client error {e:?}");
                         }
                         Event::Pong(latency) => {
-                            tracing::info!("SVR: pong latency {latency}ms");
+                            println!("pong latency {latency}ms");
                         }
                     }
                 }
