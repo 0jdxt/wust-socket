@@ -18,13 +18,13 @@ use crate::{
     role::RolePolicy,
 };
 
-pub struct WebSocket<R: RolePolicy + Send + Sync + 'static> {
+pub struct WebSocket<R: RolePolicy> {
     pub(crate) inner: Arc<ConnInner<R>>,
     pub(crate) event_rx: Receiver<Event>,
 }
 
 /// Best-effort close if user forgets to call [`WebSocket::close`].
-impl<R: RolePolicy + Send + Sync + 'static> Drop for WebSocket<R> {
+impl<R: RolePolicy> Drop for WebSocket<R> {
     fn drop(&mut self) {
         if !self.inner.closing.load(Ordering::Acquire) {
             let _ = self.close();
@@ -32,7 +32,7 @@ impl<R: RolePolicy + Send + Sync + 'static> Drop for WebSocket<R> {
     }
 }
 
-impl<R: RolePolicy + Send + Sync + 'static> WebSocket<R> {
+impl<R: RolePolicy> WebSocket<R> {
     pub async fn send_text(&self, text: &str) -> Result<()> {
         self.inner.send(text.as_bytes(), Opcode::Text).await
     }

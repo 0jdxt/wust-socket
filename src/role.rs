@@ -1,4 +1,4 @@
-pub trait RolePolicy {
+pub trait RolePolicy: Send + Sync + 'static {
     const MASK_OUTGOING: bool;
     const EXPECT_MASKED: bool;
 }
