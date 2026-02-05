@@ -1,11 +1,7 @@
-use std::{
-    fs::File,
-    io::{Read, Result},
-    thread,
-    time::Duration,
-};
+use std::{fs::File, io::Read, time::Duration};
 
 use clap::Parser;
+use tokio::sync::mpsc::error::SendError;
 use tracing_subscriber::EnvFilter;
 use wust_socket::{Event, WebSocketClient};
 
@@ -23,8 +19,12 @@ struct Args {
     port: u16,
 }
 
+impl Args {
+    fn as_addr(&self) -> (&str, u16) { (self.addr.as_str(), self.port) }
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), SendError<Vec<u8>>> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env().add_directive("wust_socket=info".parse().unwrap()),
@@ -35,22 +35,22 @@ async fn main() -> Result<()> {
 
     let data = {
         let mut s = String::new();
-        let mut f = File::open("/usr/share/cracklib/cracklib-small")?;
-        f.read_to_string(&mut s)?;
+        let mut f = File::open("/usr/share/cracklib/cracklib-small").unwrap();
+        f.read_to_string(&mut s).unwrap();
         s
     };
 
     let args = Args::parse();
 
     for _ in 0..2 {
-        let mut ws = WebSocketClient::connect((args.addr.as_str(), args.port))
+        let mut ws = WebSocketClient::connect(args.as_addr())
             .await
             .expect("connect");
 
         ws.send_text(&data).await?;
         ws.send_text(LOREM).await?;
 
-        while let Some(e) = ws.recv_timeout(Duration::from_millis(50)).await {
+        while let Some(e) = ws.recv_timeout(Duration::from_secs(1)).await {
             match e {
                 Event::Closed => {
                     println!("connection closed");
@@ -62,11 +62,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        println!("timed out");
-
         ws.close().await?;
-        // wait for close/tcp fin
-        thread::sleep(Duration::from_millis(100));
     }
 
     Ok(())

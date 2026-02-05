@@ -1,22 +1,12 @@
-use std::{
-    io::Result,
-    marker::PhantomData,
-    sync::{Arc, atomic::AtomicBool},
-};
+use std::io::Result;
 
 use base64::engine::{Engine, general_purpose::STANDARD as base64};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, ToSocketAddrs},
-    sync::{Mutex, mpsc::channel},
 };
 
-use crate::{
-    Event, Message,
-    protocol::PingStats,
-    role::Server,
-    ws::{ConnInner, WebSocket},
-};
+use crate::{Event, Message, role::Server, ws::WebSocket};
 
 pub type ServerConn = WebSocket<Server>;
 
@@ -34,8 +24,7 @@ impl WebSocketServer {
     pub async fn run(&self) -> Result<()> {
         while let Ok((stream, _addr)) = self.listener.accept().await {
             tokio::task::spawn(async move {
-                let mut ws = ServerConn::from_stream(stream).await.unwrap();
-                ws.ping().await.unwrap();
+                let mut ws = ServerConn::try_upgrade(stream).await.unwrap();
 
                 // Spawn a thread to handle events from this client
                 while let Some(event) = ws.event_rx.recv().await {
@@ -69,7 +58,7 @@ impl WebSocketServer {
 }
 
 impl ServerConn {
-    async fn from_stream(mut stream: TcpStream) -> std::result::Result<Self, std::io::Error> {
+    async fn try_upgrade(mut stream: TcpStream) -> std::result::Result<Self, std::io::Error> {
         let mut buf = [0; 1024];
         let n = stream.read(&mut buf).await?;
         let request = String::from_utf8_lossy(&buf[..n]);
@@ -98,21 +87,8 @@ impl ServerConn {
 
         stream.write_all(response.as_bytes()).await?;
 
-        tracing::info!(addr = ?stream.peer_addr().unwrap(), "upgraded client");
-        let (reader, writer) = stream.into_split();
-
-        let (event_tx, event_rx) = channel(64);
-        let ws = Self {
-            inner: Arc::new(ConnInner {
-                writer: Mutex::new(writer),
-                ping_stats: Mutex::new(PingStats::new()),
-                closed: AtomicBool::new(false),
-                closing: AtomicBool::new(false),
-                _role: PhantomData,
-            }),
-            event_rx,
-        };
-        ws.recv_loop(reader, event_tx);
+        let ws = Self::from_stream(stream);
+        tracing::info!(addr = ?ws.addr(), "upgraded client");
         Ok(ws)
     }
 }

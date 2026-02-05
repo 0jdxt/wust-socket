@@ -1,3 +1,5 @@
+use tokio::sync::mpsc::error::SendError;
+
 use crate::protocol::Message;
 
 /// `Event`s are produced by [`WebSocketClient::recv`](crate::WebSocketClient::recv)
@@ -11,5 +13,5 @@ pub enum Event {
     /// The connection to the websocket has been closed.
     Closed,
     /// An `io::Error`
-    Error(std::io::Error),
+    Error(SendError<Vec<u8>>),
 }
