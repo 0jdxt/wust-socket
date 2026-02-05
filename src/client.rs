@@ -1,23 +1,12 @@
-use std::{
-    collections::HashMap,
-    marker::PhantomData,
-    net::SocketAddr,
-    sync::{Arc, atomic::AtomicBool},
-    time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 use base64::engine::{Engine, general_purpose::STANDARD as BASE64};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpStream, ToSocketAddrs},
-    sync::{Mutex, mpsc::channel},
 };
 
-use crate::{
-    protocol::PingStats,
-    role::Client,
-    ws::{ConnInner, WebSocket},
-};
+use crate::{role::Client, ws::WebSocket};
 
 type Result<T> = std::result::Result<T, UpgradeError>;
 
@@ -56,7 +45,7 @@ pub enum UpgradeError {
 impl WebSocketClient {
     /// Attempts to connect to socket and upgrade connection.
     pub async fn connect(addr: impl ToSocketAddrs) -> Result<Self> {
-        Self::from_stream(
+        Self::try_upgrade(
             TcpStream::connect(addr)
                 .await
                 .map_err(|_| UpgradeError::Connect)?,
@@ -73,9 +62,9 @@ impl WebSocketClient {
         }
     }
 
-    async fn from_stream(mut stream: TcpStream) -> Result<Self> {
+    async fn try_upgrade(mut stream: TcpStream) -> Result<Self> {
         // store peer_addr
-        let addr = stream.peer_addr().unwrap();
+        let addr = stream.peer_addr().map_err(|_| UpgradeError::Addr)?;
 
         let sec_websocket_key = {
             let mut key_bytes = [0u8; 16];
@@ -85,12 +74,11 @@ impl WebSocketClient {
 
         let req = format!(
             "GET / HTTP/1.1\r\n\
-            Host: {}\r\n\
+            Host: {addr}\r\n\
             Upgrade: websocket\r\n\
             Connection: Upgrade\r\n\
             Sec-WebSocket-Key: {sec_websocket_key}\r\n\
             Sec-WebSocket-Version: 13\r\n\r\n",
-            stream.peer_addr().map_err(|_| UpgradeError::Addr)?
         );
         // send upgrade request
         stream
@@ -152,22 +140,8 @@ impl WebSocketClient {
             }
         }
 
+        let ws = Self::from_stream(reader.into_inner());
         tracing::info!(addr = ?addr, "successfully connected to peer");
-
-        let (event_tx, event_rx) = channel(64);
-        let (reader, writer) = reader.into_inner().into_split();
-        let ws = WebSocket {
-            inner: Arc::new(ConnInner {
-                writer: Mutex::new(writer),
-                ping_stats: Mutex::new(PingStats::new()),
-                closing: AtomicBool::new(false),
-                closed: AtomicBool::new(false),
-                _role: PhantomData,
-            }),
-            event_rx,
-        };
-        ws.recv_loop(reader, event_tx.clone());
-        ws.ping_loop(30, event_tx.clone());
         Ok(ws)
     }
 }

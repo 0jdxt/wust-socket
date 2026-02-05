@@ -1,20 +1,20 @@
 use std::marker::PhantomData;
 
 use super::Opcode;
-use crate::role::RolePolicy;
+use crate::{role::RolePolicy, CloseReason};
 
 // -- FAST PATH --
 // Separate ControlFrame struct to allow a fast path for sending single frames (Ping, Pong, Close) which
 // will have a payload <= 125 bytes and FIN always set.
-pub(crate) struct ControlFrame<'a, P: RolePolicy> {
+pub(crate) struct ControlFrame<'a, R: RolePolicy> {
     opcode: Opcode,
     payload: &'a [u8],
-    _p: PhantomData<P>,
+    _p: PhantomData<R>,
 }
 
 // Functions to produce each kind of ControlFrame with payload,
 // and a send function to write to stream
-impl<'a, P: RolePolicy> ControlFrame<'a, P> {
+impl<'a, R: RolePolicy> ControlFrame<'a, R> {
     pub(crate) fn ping(payload: &'a [u8]) -> Self {
         Self {
             opcode: Opcode::Ping,
@@ -39,8 +39,16 @@ impl<'a, P: RolePolicy> ControlFrame<'a, P> {
         }
     }
 
+    pub(crate) fn close_reason(reason: CloseReason, text: &'static str) -> Vec<u8> {
+        let code: [u8; 2] = reason.into();
+        let mut payload = Vec::with_capacity(2 + text.len());
+        payload.extend_from_slice(&code);
+        payload.extend_from_slice(text.as_bytes());
+        ControlFrame::<R>::close(&payload).encode()
+    }
+
     // encoding: sets Opcode, FIN, MASK and optionally masks payload
-    pub(crate) fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(self) -> Vec<u8> {
         tracing::info!(
             opcode = ?self.opcode,
             len = self.payload.len(),
@@ -52,7 +60,7 @@ impl<'a, P: RolePolicy> ControlFrame<'a, P> {
         buf[1] = u8::try_from(self.payload.len()).expect("ControlFrame payload too large");
 
         // Clients must SEND masked
-        let header_end = if P::MASK_OUTGOING {
+        let header_end = if R::MASK_OUTGOING {
             buf[1] |= 0x80;
             rand::fill(&mut buf[2..6]);
             for (i, b) in self.payload.iter().enumerate() {

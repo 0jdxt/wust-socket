@@ -1,10 +1,7 @@
-use std::{
-    fs::File,
-    io::{Read, Result},
-    time::Duration,
-};
+use std::{fs::File, io::Read, time::Duration};
 
 use clap::Parser;
+use tokio::sync::mpsc::error::SendError;
 use tracing_subscriber::EnvFilter;
 use wust_socket::{Event, WebSocketClient};
 
@@ -27,7 +24,7 @@ impl Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), SendError<Vec<u8>>> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env().add_directive("wust_socket=info".parse().unwrap()),
@@ -38,8 +35,8 @@ async fn main() -> Result<()> {
 
     let data = {
         let mut s = String::new();
-        let mut f = File::open("/usr/share/cracklib/cracklib-small")?;
-        f.read_to_string(&mut s)?;
+        let mut f = File::open("/usr/share/cracklib/cracklib-small").unwrap();
+        f.read_to_string(&mut s).unwrap();
         s
     };
 
@@ -53,7 +50,7 @@ async fn main() -> Result<()> {
         ws.send_text(&data).await?;
         ws.send_text(LOREM).await?;
 
-        while let Some(e) = ws.recv_timeout(Duration::from_millis(50)).await {
+        while let Some(e) = ws.recv_timeout(Duration::from_secs(1)).await {
             match e {
                 Event::Closed => {
                     println!("connection closed");
@@ -64,8 +61,6 @@ async fn main() -> Result<()> {
                 Event::Error(e) => println!("ERR: {e}"),
             }
         }
-
-        println!("timed out");
 
         ws.close().await?;
     }
