@@ -1,7 +1,6 @@
 use std::{
     fs::File,
     io::{Read, Result},
-    thread,
     time::Duration,
 };
 
@@ -21,6 +20,10 @@ struct Args {
     /// Port to connect to
     #[arg(short, long, default_value_t = 9001)]
     port: u16,
+}
+
+impl Args {
+    fn as_addr(&self) -> (&str, u16) { (self.addr.as_str(), self.port) }
 }
 
 #[tokio::main]
@@ -43,7 +46,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     for _ in 0..2 {
-        let mut ws = WebSocketClient::connect((args.addr.as_str(), args.port))
+        let mut ws = WebSocketClient::connect(args.as_addr())
             .await
             .expect("connect");
 
@@ -65,8 +68,6 @@ async fn main() -> Result<()> {
         println!("timed out");
 
         ws.close().await?;
-        // wait for close/tcp fin
-        thread::sleep(Duration::from_millis(100));
     }
 
     Ok(())

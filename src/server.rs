@@ -35,7 +35,6 @@ impl WebSocketServer {
         while let Ok((stream, _addr)) = self.listener.accept().await {
             tokio::task::spawn(async move {
                 let mut ws = ServerConn::from_stream(stream).await.unwrap();
-                ws.ping().await.unwrap();
 
                 // Spawn a thread to handle events from this client
                 while let Some(event) = ws.event_rx.recv().await {

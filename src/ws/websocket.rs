@@ -25,11 +25,7 @@ pub struct WebSocket<R: RolePolicy> {
 
 /// Best-effort close if user forgets to call [`WebSocket::close`].
 impl<R: RolePolicy> Drop for WebSocket<R> {
-    fn drop(&mut self) {
-        if !self.inner.closing.load(Ordering::Acquire) {
-            let _ = self.close();
-        }
-    }
+    fn drop(&mut self) { self.inner.closing.store(true, Ordering::Release); }
 }
 
 impl<R: RolePolicy> WebSocket<R> {
