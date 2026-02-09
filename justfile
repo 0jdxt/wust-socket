@@ -1,16 +1,18 @@
-watch:
+port := "6969"
+
+watch p=port:
     #!/bin/bash
-    just server &
+    just server {{p}} &
     SERVER_PID=$!
     while inotifywait -r -e modify src Cargo.toml; do
         echo "Change detected! Restarting server..."
         kill $SERVER_PID
-        just server &
+        just server {{p}} &
         SERVER_PID=$!
     done
 
-server:
-    cargo r --bin server -- -p 6969
+server p=port:
+    cargo r --bin server -- -p {{p}}
 
-client:
-    cargo r --bin client -- -p 6969
+client p=port:
+    cargo r --bin client -- -p {{p}}
