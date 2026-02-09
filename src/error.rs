@@ -11,6 +11,8 @@ pub enum CloseReason {
     ProtoError = 1002,
     /// Unsupported data type
     DataType = 1003,
+    /// Reserved code, should never be seen
+    RSV = 1004,
     /// No reason code provided
     NoneGiven = 1005,
     /// Abnormal closure
@@ -27,6 +29,8 @@ pub enum CloseReason {
     Unexpected = 1011,
     /// TLS error
     TLS = 1015,
+    /// Other valid codes with unknown meanings
+    Unknown = 4000, // private use code
 }
 
 /// Converts a reason code to bytes of the appropriate endianness.
@@ -41,6 +45,7 @@ impl From<[u8; 2]> for CloseReason {
             1001 => CloseReason::GoingAway,
             1002 => CloseReason::ProtoError,
             1003 => CloseReason::DataType,
+            1004 => CloseReason::RSV,
             1005 => CloseReason::NoneGiven,
             1006 => CloseReason::Abnormal,
             1007 => CloseReason::DataError,
@@ -49,7 +54,42 @@ impl From<[u8; 2]> for CloseReason {
             1010 => CloseReason::Extension,
             1011 => CloseReason::Unexpected,
             1015 => CloseReason::TLS,
-            _ => unreachable!(),
+            _ => CloseReason::Unknown,
         }
     }
+}
+
+/// Errors that can occur when upgrading a TCP stream to a WebSocket.
+#[derive(Debug)]
+pub enum UpgradeError {
+    /// Tried to connect to invalid url.
+    InvalidUrl,
+    /// Failed to bind TCP listener.
+    Bind,
+    /// Failed to read from the TCP stream.
+    Read,
+    /// Failed to write to the TCP steam.
+    Write,
+    /// Server returned an unexpected HTTP status line.
+    StatusLine(String),
+    /// Missing header from upgrade request.
+    MissingHeader(&'static str),
+    /// A handshake header did not match expectations.
+    Header {
+        /// The name of the header field.
+        field: &'static str,
+        /// The expected value.
+        expected: String,
+        /// The actual value.
+        got: String,
+    },
+    /// Failed to obtain the socket's peer address.
+    ///
+    /// This can happen if the socket is not connected, has been closed,
+    /// or the underlying OS socket is invalid.
+    Addr,
+    /// Failed to establish TCP connection.
+    Connect,
+    /// Attempt to connect timed out.
+    Timeout,
 }

@@ -1,4 +1,4 @@
-pub trait RolePolicy: Send + Sync + 'static {
+pub trait RolePolicy: Send + Sync + 'static + std::fmt::Debug {
     const MASK_OUTGOING: bool;
     const EXPECT_MASKED: bool;
 }

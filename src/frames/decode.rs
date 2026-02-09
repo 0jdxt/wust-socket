@@ -102,7 +102,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
                     };
                     self.state = DecodeState::Header1;
 
-                    tracing::debug!(
+                    tracing::trace!(
                         opcode = ?self.ctx.opcode,
                         fin = self.ctx.is_fin,
                         payload_len = payload.len(),
@@ -147,6 +147,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
             payload_len: 0,
             mask_key: [0, 0, 0, 0],
         };
+
         Ok(DecodeState::Header2)
     }
 
@@ -376,6 +377,7 @@ mod tests {
 
 #[cfg(test)]
 mod bench {
+    #![allow(clippy::cast_possible_truncation)]
     extern crate test;
 
     use test::{black_box, Bencher};

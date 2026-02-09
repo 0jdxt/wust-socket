@@ -1,5 +1,9 @@
 use std::time::Instant;
 
+use tokio::sync::mpsc::{Sender, error::SendError};
+
+use crate::{frames::ControlFrame, role::RolePolicy};
+
 const N: usize = 5;
 const NONCE_LEN: usize = 8;
 
@@ -21,12 +25,17 @@ impl PingStats {
         }
     }
 
-    pub(crate) fn new_ping(&mut self) -> &[u8; NONCE_LEN] {
+    pub(crate) async fn new_ping<R: RolePolicy>(
+        &mut self,
+        ctrl_tx: &Sender<Vec<u8>>,
+    ) -> Result<(), SendError<Vec<u8>>> {
         self.last_ping = Instant::now();
         let mut buf = [0; NONCE_LEN];
         rand::fill(&mut buf);
         self.last_nonce = buf;
-        &self.last_nonce
+
+        let f = ControlFrame::<R>::ping(&buf).encode();
+        ctrl_tx.send(f).await
     }
 
     pub(crate) fn on_pong(&mut self, nonce: [u8; NONCE_LEN]) -> Result<u16, PongError> {

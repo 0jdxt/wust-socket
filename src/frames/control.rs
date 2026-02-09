@@ -40,16 +40,21 @@ impl<'a, R: RolePolicy> ControlFrame<'a, R> {
     }
 
     pub(crate) fn close_reason(reason: CloseReason, text: &'static str) -> Vec<u8> {
+        let mut payload = [0; 125];
+        // push code bytes
         let code: [u8; 2] = reason.into();
-        let mut payload = Vec::with_capacity(2 + text.len());
-        payload.extend_from_slice(&code);
-        payload.extend_from_slice(text.as_bytes());
-        ControlFrame::<R>::close(&payload).encode()
+        payload[..2].copy_from_slice(&code);
+
+        // limit text length to 123
+        let len = text.floor_char_boundary(123);
+        let bytes = &text.as_bytes()[..len];
+        payload[2..2 + len].copy_from_slice(bytes);
+        ControlFrame::<R>::close(&payload[..2 + len]).encode()
     }
 
     // encoding: sets Opcode, FIN, MASK and optionally masks payload
     pub(crate) fn encode(self) -> Vec<u8> {
-        tracing::info!(
+        tracing::trace!(
             opcode = ?self.opcode,
             len = self.payload.len(),
             "encoding CTRL"
@@ -60,18 +65,17 @@ impl<'a, R: RolePolicy> ControlFrame<'a, R> {
         buf[1] = u8::try_from(self.payload.len()).expect("ControlFrame payload too large");
 
         // Clients must SEND masked
-        let header_end = if R::MASK_OUTGOING {
+        if R::MASK_OUTGOING {
             buf[1] |= 0x80;
             rand::fill(&mut buf[2..6]);
             for (i, b) in self.payload.iter().enumerate() {
                 buf[6 + i] = b ^ buf[2 + (i % 4)];
             }
-            6
+            buf[..6 + self.payload.len()].to_vec()
         } else {
             buf[2..2 + self.payload.len()].copy_from_slice(self.payload);
-            2
-        };
-        buf[..header_end + self.payload.len()].to_vec()
+            buf[..2 + self.payload.len()].to_vec()
+        }
     }
 }
 
@@ -84,6 +88,7 @@ mod bench {
     use super::*;
     use crate::role::*;
 
+    #[allow(clippy::cast_possible_truncation)]
     fn make_payload(len: usize) -> Vec<u8> { (0..len).map(|i| i as u8).collect() }
 
     fn bench_control_frame<P: RolePolicy>(b: &mut Bencher, payload_len: usize) {

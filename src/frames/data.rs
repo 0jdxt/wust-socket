@@ -6,6 +6,7 @@ use crate::{role::RolePolicy, MAX_FRAME_PAYLOAD, MAX_MESSAGE_SIZE};
 // -- SLOW PATH --
 // DataFrames may be fragmented or very large hence they need extra processing compared to
 // ControlFrames
+#[derive(Debug)]
 pub(crate) struct DataFrame<'a, P: RolePolicy> {
     opcode: Opcode,
     payload: &'a [u8],
@@ -24,63 +25,71 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
     pub(crate) fn encode(self) -> Vec<Vec<u8>> {
         let mut first = true;
         let mut chunks = Vec::with_capacity(MAX_MESSAGE_SIZE.div_ceil(MAX_FRAME_PAYLOAD));
-        let mut iter = self.payload.chunks(MAX_FRAME_PAYLOAD).peekable();
 
-        while let Some(chunk) = iter.next() {
-            tracing::trace!(
-                opcode = ?self.opcode,
-                len = chunk.len(),
-                "encoding DATA"
-            );
+        // TODO: if remainder empty set last frame properly
+        let (chunked, remainder) = self.payload.as_chunks::<MAX_FRAME_PAYLOAD>();
 
-            // Set OPCODE and FIN
-            let opcode = if first {
-                first = false;
-                self.opcode
-            } else {
-                Opcode::Cont
-            } as u8;
-            let mut buf = Vec::with_capacity(chunk.len() + 14);
-            buf.push(if iter.peek().is_none() { 0x80 } else { 0 } | opcode);
+        for chunk in chunked {
+            chunks.push(self.single_frame(chunk, &mut first, false));
+        }
+        chunks.push(self.single_frame(remainder, &mut first, true));
 
-            // push LEN
-            #[allow(clippy::cast_possible_truncation)]
-            match chunk.len() {
-                0..=125 => {
-                    buf.push(chunk.len() as u8);
-                }
-                126..=65535 => {
-                    buf.push(126);
-                    buf.extend_from_slice(&(chunk.len() as u16).to_be_bytes());
-                }
-                _ => {
-                    buf.push(127);
-                    buf.extend_from_slice(&(chunk.len() as u64).to_be_bytes());
-                }
+        chunks
+    }
+
+    fn single_frame(&self, chunk: &[u8], first: &mut bool, last: bool) -> Vec<u8> {
+        tracing::info!(
+            opcode = ?self.opcode,
+            len = chunk.len(),
+            first = first,
+            fin = last,
+            "encoding DATA"
+        );
+
+        // Set OPCODE and FIN
+        let opcode = if *first {
+            *first = false;
+            self.opcode
+        } else {
+            Opcode::Cont
+        } as u8;
+        let mut buf = Vec::with_capacity(chunk.len() + 14);
+        buf.push(if last { 0x80 } else { 0 } | opcode);
+
+        // push LEN
+        #[allow(clippy::cast_possible_truncation)]
+        match chunk.len() {
+            0..=125 => {
+                buf.push(chunk.len() as u8);
             }
-
-            // Clients must SEND masked
-            if P::MASK_OUTGOING {
-                // set MASK bit
-                buf[1] |= 0x80;
-                // get random bytes and push to buf
-                let mut mask_key = [0u8; 4];
-                rand::fill(&mut mask_key);
-                buf.extend_from_slice(&mask_key);
-
-                // mask bytes
-                let start = buf.len();
-                buf.extend_from_slice(chunk);
-                crate::protocol::mask(&mut buf[start..], mask_key);
-            } else {
-                buf.extend_from_slice(chunk);
+            126..=65535 => {
+                buf.push(126);
+                buf.extend_from_slice(&(chunk.len() as u16).to_be_bytes());
             }
-
-            chunks.push(buf);
+            _ => {
+                buf.push(127);
+                buf.extend_from_slice(&(chunk.len() as u64).to_be_bytes());
+            }
         }
 
-        tracing::info!(len = self.payload.len(), "encoded DATA");
-        chunks
+        // Clients must SEND masked
+        if P::MASK_OUTGOING {
+            // set MASK bit
+            buf[1] |= 0x80;
+            // get random bytes and push to buf
+            let mut mask_key = [0; 4];
+            rand::fill(&mut mask_key);
+            buf.extend_from_slice(&mask_key);
+
+            // mask bytes
+            let start = buf.len();
+            buf.extend_from_slice(chunk);
+            crate::protocol::mask(&mut buf[start..], mask_key);
+        } else {
+            buf.extend_from_slice(chunk);
+        }
+
+        buf
     }
 }
 
@@ -93,6 +102,7 @@ mod bench {
     use super::*;
     use crate::role::*;
 
+    #[allow(clippy::cast_possible_truncation)]
     fn make_payload(len: usize) -> Vec<u8> { (0..len).map(|i| i as u8).collect() }
 
     fn bench_data_frame<P: RolePolicy>(b: &mut Bencher, payload_len: usize) {

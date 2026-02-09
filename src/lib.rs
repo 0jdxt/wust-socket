@@ -1,11 +1,5 @@
 #![feature(test)]
 #![warn(clippy::all, clippy::pedantic)]
-#![allow(
-    clippy::empty_docs,
-    clippy::missing_errors_doc,
-    clippy::missing_panics_doc,
-    clippy::missing_safety_doc
-)]
 
 mod client;
 mod error;
@@ -15,11 +9,11 @@ mod role;
 mod server;
 mod ws;
 
-pub use client::{UpgradeError, WebSocketClient};
-pub use error::CloseReason;
+pub use client::WebSocketClient;
+pub use error::{CloseReason, UpgradeError};
 pub use protocol::Message;
-pub use server::{ServerConn, WebSocketServer};
+pub use server::{MessageHandler, ServerConn, WebSocketServer};
 pub use ws::{Event, WebSocket};
 
-pub(crate) const MAX_FRAME_PAYLOAD: usize = 32 * 1024;
-pub(crate) const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+pub(crate) const MAX_FRAME_PAYLOAD: usize = 16 * 1024 * 1024; // 16M
+pub(crate) const MAX_MESSAGE_SIZE: usize = MAX_FRAME_PAYLOAD;

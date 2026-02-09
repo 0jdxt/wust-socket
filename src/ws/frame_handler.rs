@@ -19,11 +19,11 @@ pub(super) async fn handle_frame<R: RolePolicy>(
     event_tx: &Sender<Event>,
 ) -> Option<()> {
     match frame.opcode {
+        Opcode::Text | Opcode::Bin | Opcode::Cont => {
+            handle_data::<R>(frame, partial_msg, close_tx, event_tx).await?;
+        }
         Opcode::Pong => handle_pong::<R>(frame, close_tx, event_tx, inner).await,
         Opcode::Ping => handle_ping::<R>(frame, ctrl_tx).await,
-        Opcode::Text | Opcode::Bin | Opcode::Cont => {
-            handle_message::<R>(frame, partial_msg, close_tx, event_tx).await?;
-        }
         Opcode::Close => {
             handle_close::<R>(frame, inner, close_tx, event_tx).await;
             return None;
@@ -81,12 +81,30 @@ async fn handle_close<R: RolePolicy>(
     close_tx: &Sender<Vec<u8>>,
     event_tx: &Sender<Event>,
 ) {
-    let code = CloseReason::from([frame.payload[0], frame.payload[1]]);
+    // Here we parse the close reason in order to give the appropriate response.
+    // If empty, treat as normal.
+    let code = if frame.payload.is_empty() {
+        CloseReason::Normal
+    } else {
+        CloseReason::from([frame.payload[0], frame.payload[1]])
+    };
+
     tracing::info!(reason=?code, "recieved Close frame");
+
+    let reason = match code {
+        // codes that should never touch the wire
+        CloseReason::RSV | CloseReason::NoneGiven | CloseReason::Abnormal | CloseReason::TLS => {
+            CloseReason::ProtoError
+        }
+        // we dont echo any codes back, jsut reply with normal
+        _ => CloseReason::Normal,
+    };
+    tracing::trace!(reason=?code, "sending Close frame");
+
     // if not already closing try to send close frame, log err
     if !inner.closing.swap(true, Ordering::AcqRel) {
-        let f = ControlFrame::<R>::close(&frame.payload);
-        if let Err(e) = close_tx.send(f.encode()).await {
+        let f = ControlFrame::<R>::close_reason(reason, "peer closed");
+        if let Err(e) = close_tx.send(f).await {
             tracing::warn!("Err: error sending close: {e}");
             let _ = event_tx.send(Event::Error(e)).await;
         }
@@ -94,7 +112,7 @@ async fn handle_close<R: RolePolicy>(
 }
 
 // Build message out of frames
-async fn handle_message<R: RolePolicy>(
+async fn handle_data<R: RolePolicy>(
     frame: &DecodedFrame,
     partial_msg: &mut Option<PartialMessage>,
     close_tx: &Sender<Vec<u8>>,
