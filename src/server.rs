@@ -53,7 +53,7 @@ impl WebSocketServer {
         })
     }
 
-    /// TODO:
+    // TODO: run docs
     pub async fn run<H: MessageHandler>(&self, handler: H) {
         let acceptor = TlsAcceptor::from(get_tls_config());
 

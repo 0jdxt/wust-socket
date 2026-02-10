@@ -27,7 +27,9 @@ struct ClientContext<'a> {
 
 /// Client connection implementation for WebSocket
 impl WebSocketClient {
-    /// Attempts to connect to socket and upgrade connection.
+    /// Attempts to connect to the given url and upgrade connection.
+    /// Urls must be of format `"ws[s]://host[:port][/path]"` where
+    /// host is either a domain name or IP address.
     /// # Errors
     /// Fails if unable to connect to the peer.
     pub async fn connect(input: &str) -> Result<Self> {
@@ -80,7 +82,8 @@ impl WebSocketClient {
         }
     }
 
-    /// Attempts to connect to socket and upgrade connection, with timeout.
+    /// Attempts to call [`connect`](WebSocketClient::connect), with a timeout. See `connect` for
+    /// more information.
     /// # Errors
     /// Fails if unable to connect to the peer or timeout has elapsed.
     pub async fn connect_timeout(input: &str, timeout: Duration) -> Result<Self> {
