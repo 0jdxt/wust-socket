@@ -1,87 +1,119 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
+use rustls::ServerConfig;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{TcpListener, TcpStream, ToSocketAddrs},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::{TcpListener, ToSocketAddrs},
+};
+use tokio_rustls::{
+    TlsAcceptor,
+    rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
 };
 
-use crate::{Event, Message, error::UpgradeError, role::Server, ws::WebSocket};
+use crate::{
+    error::UpgradeError,
+    role::Server,
+    ws::{MessageHandler, WebSocket},
+};
 
 type Result<T> = std::result::Result<T, UpgradeError>;
-pub type ServerConn = WebSocket<Server>;
 
 pub struct WebSocketServer {
     listener: TcpListener,
     addr: SocketAddr,
-}
-
-// TODO: make handlers work properly
-pub trait MessageHandler: Send + Sync + Copy + Clone + 'static {
-    fn on_text<'a>(&self, s: &'a str) -> Option<impl AsRef<[u8]> + Send + 'a>;
-    fn on_binary<'a>(&self, b: &'a [u8]) -> Option<impl AsRef<[u8]> + Send + 'a>;
-    fn on_close(&self) -> Option<impl AsRef<[u8]>>;
-    fn on_error(&self, e: &[u8]) -> Option<impl AsRef<[u8]>>;
-    fn on_pong(&self, latency: u16) -> Option<impl AsRef<[u8]>>;
+    insecure: bool,
+    ssl: bool,
 }
 
 impl WebSocketServer {
     /// Creates a new `WebSocketServer` which will be bound to the specified address.
     ///
-    /// Binding with a port number of 0 will request that the OS assigns a port to this listener. The port allocated can be queried via the [`WebSocketServer::addr`] method.
+    /// Binding with a port number of 0 will request that the OS assigns a port to this listener. The port allocated can be queried via the [`addr`](WebSocketServer::addr) method.
     ///
     /// The address type can be any implementor of [`ToSocketAddrs`] trait. See its documentation for concrete examples.
     ///
     /// If addr yields multiple addresses, bind will be attempted with each of the addresses until one succeeds and returns the listener.
+    ///
+    /// The `insecure` parameter sets whether the server accepts insecure connections over TCP.
+    /// Similarly, the `ssl` parameter sets whether the server accepts secure connecions over TLS.
+    ///
     /// # Errors
     /// Will fail if unable to bind to any address.
-    pub async fn bind(addr: impl ToSocketAddrs) -> Result<Self> {
+    pub async fn bind<A: ToSocketAddrs>(addr: A, insecure: bool, ssl: bool) -> Result<Self> {
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|_| UpgradeError::Bind)?;
         let addr = listener.local_addr().map_err(|_| UpgradeError::Addr)?;
         tracing::info!(addr = ?addr, "Listening on");
-        Ok(Self { listener, addr })
+        Ok(Self {
+            listener,
+            addr,
+            insecure,
+            ssl,
+        })
     }
 
+    /// TODO:
     pub async fn run<H: MessageHandler>(&self, handler: H) {
+        let acceptor = TlsAcceptor::from(get_tls_config());
+
+        let peer = self.addr;
+        let insecure = self.insecure;
+        let ssl = self.ssl;
+        let handler = Arc::new(handler);
         while let Ok((stream, addr)) = self.listener.accept().await {
+            let handler = handler.clone();
+            let acceptor = acceptor.clone();
             tokio::task::spawn(async move {
-                let Ok(mut ws) = ServerConn::try_upgrade(stream, addr).await else {
-                    println!("failed to upgrade");
-                    return;
+                // check first few bytes of request.
+                let mut peeker = [0; 4];
+                match stream.peek(&mut peeker).await {
+                    Ok(0) => {
+                        return; // client disconnected
+                    }
+                    Err(e) => {
+                        tracing::error!(e=?e, "could not read socket");
+                        return;
+                    }
+                    _ => {}
+                }
+
+                // attempt to connect to and upgrade stream
+                let conn_res = if peeker.starts_with(b"GET ") {
+                    // if we have "GET ", it is plain TCP
+                    if insecure {
+                        tracing::info!("attempting insecure upgrade");
+                        WebSocket::<Server>::try_upgrade(stream, addr, peer).await
+                    } else {
+                        Err(UpgradeError::Protocol)
+                    }
+                } else {
+                    // otherwise try to use TLS
+                    if ssl {
+                        match acceptor.accept(stream).await {
+                            Ok(stream) => {
+                                tracing::info!("attempting TLS upgrade");
+                                WebSocket::<Server>::try_upgrade(stream, addr, peer).await
+                            }
+                            Err(e) => {
+                                tracing::error!(e=?e, "tls handshake");
+                                Err(UpgradeError::Connect)
+                            }
+                        }
+                    } else {
+                        Err(UpgradeError::Protocol)
+                    }
                 };
 
-                // Spawn a thread to handle events from this client
-                while let Some(event) = ws.event_rx.recv().await {
-                    match event {
-                        Event::Message(msg) => match msg {
-                            Message::Text(s) => {
-                                if let Some(reply) = handler.on_text(&s)
-                                    && let Err(e) = ws.send_bytes(reply.as_ref()).await
-                                {
-                                    tracing::error!(e = ?e, "failed to send text message");
-                                }
-                            }
-                            Message::Binary(b) => {
-                                if let Some(reply) = handler.on_binary(&b)
-                                    && let Err(e) = ws.send_bytes(reply.as_ref()).await
-                                {
-                                    tracing::error!(e = ?e, "failed to send binary message");
-                                }
-                            }
-                        },
-                        Event::Closed => {
-                            handler.on_close();
-                            break;
-                        }
-                        Event::Error(e) => {
-                            handler.on_error(&e.0);
-                        }
-                        Event::Pong(latency) => {
-                            handler.on_pong(latency);
-                        }
+                let mut ws = match conn_res {
+                    Ok(ws) => ws,
+                    Err(e) => {
+                        tracing::error!(addr=?addr, e=?e, "failed to upgrade");
+                        return;
                     }
-                }
+                };
+
+                ws.recv_loop(handler).await;
             });
         }
     }
@@ -90,8 +122,29 @@ impl WebSocketServer {
     pub fn addr(&self) -> SocketAddr { self.addr }
 }
 
-impl ServerConn {
-    async fn try_upgrade(stream: TcpStream, addr: SocketAddr) -> Result<Self> {
+fn get_tls_config() -> Arc<ServerConfig> {
+    let certs = CertificateDer::pem_file_iter("certs/cert.pem")
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    let key = PrivateKeyDer::from_pem_file("certs/cert.key.pem").unwrap();
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap();
+    Arc::new(config)
+}
+
+impl WebSocket<Server> {
+    async fn try_upgrade<S>(
+        stream: S,
+        local_addr: SocketAddr,
+        peer_addr: SocketAddr,
+    ) -> Result<Self>
+    where
+        S: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static,
+    {
         let mut reader = BufReader::new(stream);
         let mut status_line = String::new();
         reader
@@ -152,8 +205,7 @@ impl ServerConn {
             .map_err(|_| UpgradeError::Write)?;
         stream.flush().await.map_err(|_| UpgradeError::Write)?;
 
-        let ws = Self::from_stream(stream);
-        tracing::info!(addr = ?addr, "upgraded client");
-        Ok(ws)
+        tracing::info!(addr = ?local_addr, "upgraded client");
+        Ok(Self::from_stream(stream, local_addr, peer_addr))
     }
 }

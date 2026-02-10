@@ -1,11 +1,15 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use base64::engine::{Engine, general_purpose::STANDARD as BASE64};
+use rustls::ClientConfig;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
 };
-use url::Url;
+use tokio_rustls::{
+    TlsConnector,
+    rustls::pki_types::{CertificateDer, IpAddr, ServerName, pem::PemObject},
+};
 
 use crate::{error::UpgradeError, role::Client, ws::WebSocket};
 
@@ -13,17 +17,67 @@ type Result<T> = std::result::Result<T, UpgradeError>;
 
 pub type WebSocketClient = WebSocket<Client>;
 
+struct ClientContext<'a> {
+    host: &'a str,
+    path: &'a str,
+    port: u16,
+    local_addr: SocketAddr,
+    peer_addr: SocketAddr,
+}
+
 /// Client connection implementation for WebSocket
 impl WebSocketClient {
     /// Attempts to connect to socket and upgrade connection.
     /// # Errors
     /// Fails if unable to connect to the peer.
     pub async fn connect(input: &str) -> Result<Self> {
-        let url = Url::parse(input).map_err(|_| UpgradeError::InvalidUrl)?;
-        if url.scheme() != "ws" && url.scheme() != "wss" {
-            return Err(UpgradeError::InvalidUrl);
+        // url metadata
+        let url = url::Url::parse(input).map_err(|_| UpgradeError::InvalidUrl)?;
+        let host = url.host_str().ok_or(UpgradeError::InvalidUrl)?;
+        let port = url
+            .port_or_known_default()
+            .ok_or(UpgradeError::InvalidUrl)?;
+        let path = url.path();
+
+        let stream = TcpStream::connect((host, port))
+            .await
+            .map_err(|_| UpgradeError::Connect)?;
+
+        let ctx = ClientContext {
+            host,
+            path,
+            port,
+            local_addr: stream.local_addr().map_err(|_| UpgradeError::Addr)?,
+            peer_addr: stream.peer_addr().map_err(|_| UpgradeError::Addr)?,
+        };
+
+        if url.scheme() == "ws" {
+            // standard TCP
+            tracing::info!("attempting insecure upgrade");
+            Self::try_upgrade(stream, ctx).await
+        } else if url.scheme() == "wss" {
+            // TCP with TLS
+
+            // try host as hostname (DNS) otherwise try IP address
+            let server = ServerName::try_from(host.to_string()).or_else(|_| {
+                let name = format!("{host}:{port}");
+                IpAddr::try_from(name.as_str())
+                    .map(ServerName::from)
+                    .map_err(|_| UpgradeError::InvalidUrl)
+            })?;
+
+            // convert stream to TLS and try handshake
+            let connector = TlsConnector::from(get_tls_config());
+            let stream = connector
+                .connect(server, stream)
+                .await
+                .map_err(|_| UpgradeError::Connect)?;
+            tracing::info!("attempting TLS upgrade");
+            Self::try_upgrade(stream, ctx).await
+        } else {
+            tracing::error!("invalid scheme");
+            Err(UpgradeError::InvalidUrl)
         }
-        Self::try_upgrade(url).await
     }
 
     /// Attempts to connect to socket and upgrade connection, with timeout.
@@ -37,26 +91,20 @@ impl WebSocketClient {
         }
     }
 
-    async fn try_upgrade(url: Url) -> Result<Self> {
-        let host = url.host_str().ok_or(UpgradeError::InvalidUrl)?;
-        let port = url.port_or_known_default().unwrap();
-        let path = url.path();
-
-        let mut stream = TcpStream::connect((host, port))
-            .await
-            .map_err(|_| UpgradeError::Connect)?;
-        // store peer_addr
-        let addr = stream.peer_addr().map_err(|_| UpgradeError::Addr)?;
-
+    async fn try_upgrade<S>(mut stream: S, ctx: ClientContext<'_>) -> Result<Self>
+    where
+        S: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static,
+    {
         let sec_websocket_key = BASE64.encode(rand::random::<[u8; 16]>());
 
         let req = format!(
-            "GET {path} HTTP/1.1\r\n\
-            Host: {host}:{port}\r\n\
+            "GET {} HTTP/1.1\r\n\
+            Host: {}:{}\r\n\
             Upgrade: websocket\r\n\
             Connection: Upgrade\r\n\
             Sec-WebSocket-Key: {sec_websocket_key}\r\n\
             Sec-WebSocket-Version: 13\r\n\r\n",
+            ctx.path, ctx.host, ctx.port
         );
         // send upgrade request
         stream
@@ -103,8 +151,32 @@ impl WebSocketClient {
         let expected_accept = Self::hash_key(&sec_websocket_key);
         Self::validate_header(&headers, "sec-websocket-accept", &expected_accept)?;
 
-        let ws = Self::from_stream(reader.into_inner());
-        tracing::info!(addr = ?addr, "successfully connected to peer");
-        Ok(ws)
+        tracing::info!(addr = ?ctx.peer_addr, "successfully connected to peer");
+        Ok(Self::from_stream(
+            reader.into_inner(),
+            ctx.local_addr,
+            ctx.peer_addr,
+        ))
     }
+}
+
+fn get_tls_config() -> Arc<ClientConfig> {
+    let certs = CertificateDer::pem_file_iter("certs/root-ca.pem")
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+
+    let root_cert_store = {
+        let mut s = rustls::RootCertStore::empty();
+        for cert in certs {
+            s.add(cert).unwrap();
+        }
+        s.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        s
+    };
+
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_cert_store)
+        .with_no_client_auth(); // i guess this was previously the default?
+    Arc::new(config)
 }

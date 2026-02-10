@@ -1,5 +1,9 @@
 port := "6969"
 
+alias w:=watch
+alias s:=server
+alias c:=client
+
 watch p=port:
     #!/bin/bash
     just server {{p}} &

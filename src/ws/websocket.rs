@@ -10,11 +10,7 @@ use std::{
 };
 
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{
-        TcpStream,
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-    },
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf},
     sync::{
         Mutex,
         mpsc::{Receiver, Sender, channel, error::SendError},
@@ -24,19 +20,14 @@ use tokio::{
 
 use super::frame_handler::handle_frame;
 use crate::{
-    CloseReason, Event, MAX_FRAME_PAYLOAD, UpgradeError,
+    Event, MAX_FRAME_PAYLOAD, Message, UpgradeError,
+    error::CloseReason,
     frames::{ControlFrame, DataFrame, FrameDecoder, FrameParseError, FrameState, Opcode},
     protocol::PingStats,
     role::RolePolicy,
 };
 
-pub(crate) struct Inner {
-    pub(crate) ping_stats: Mutex<PingStats>,
-    pub(crate) last_seen: Mutex<Instant>,
-    pub(crate) closed: AtomicBool,
-    pub(crate) closing: AtomicBool,
-}
-
+/// Generic WebSocket connection that applies masking according to role R, either client or server.
 pub struct WebSocket<R: RolePolicy> {
     pub(crate) inner: Arc<Inner>,
     pub(crate) close_tx: Sender<Vec<u8>>,
@@ -48,6 +39,28 @@ pub struct WebSocket<R: RolePolicy> {
     pub(crate) _role: PhantomData<R>,
 }
 
+pub(crate) struct Inner {
+    pub(crate) ping_stats: Mutex<PingStats>,
+    pub(crate) last_seen: Mutex<Instant>,
+    pub(crate) closed: AtomicBool,
+    pub(crate) closing: AtomicBool,
+}
+
+/// Message to be sent over the websocket.
+pub enum WsMessage {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+#[async_trait::async_trait]
+pub trait MessageHandler: Send + Sync + 'static {
+    async fn on_text(&self, s: String) -> Option<WsMessage>;
+    async fn on_binary(&self, b: Vec<u8>) -> Option<WsMessage>;
+    async fn on_close(&self);
+    async fn on_error(&self, e: Vec<u8>);
+    async fn on_pong(&self, latency: u16);
+}
+
 /// Best-effort close if user forgets to call [`WebSocket::close`].
 impl<R: RolePolicy> Drop for WebSocket<R> {
     fn drop(&mut self) { self.inner.closing.store(true, Ordering::Release); }
@@ -56,12 +69,16 @@ impl<R: RolePolicy> Drop for WebSocket<R> {
 type Result = std::result::Result<(), SendError<Vec<u8>>>;
 
 impl<R: RolePolicy> WebSocket<R> {
-    pub(crate) fn from_stream(stream: TcpStream) -> Self {
+    pub(crate) fn from_stream<S>(stream: S, local_addr: SocketAddr, peer_addr: SocketAddr) -> Self
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
         // crate channels
-        let (event_tx, event_rx) = channel(1);
-        let (close_tx, close_rx) = channel(1);
-        let (ctrl_tx, ctrl_rx) = channel(1);
-        let (data_tx, data_rx) = channel(1);
+        const CHAN_BUF: usize = 64;
+        let (event_tx, event_rx) = channel(CHAN_BUF);
+        let (close_tx, close_rx) = channel(CHAN_BUF);
+        let (ctrl_tx, ctrl_rx) = channel(CHAN_BUF);
+        let (data_tx, data_rx) = channel(CHAN_BUF);
 
         // create WebSocket struct
         let ws = Self {
@@ -71,21 +88,20 @@ impl<R: RolePolicy> WebSocket<R> {
                 closed: AtomicBool::new(false),
                 closing: AtomicBool::new(false),
             }),
-            peer_addr: stream.peer_addr().unwrap(),
-            local_addr: stream.local_addr().unwrap(),
             close_tx: close_tx.clone(),
             ctrl_tx: ctrl_tx.clone(),
             data_tx,
             event_rx,
+            local_addr,
+            peer_addr,
             _role: PhantomData,
         };
 
         // initiate background loops
-        let (reader, writer) = stream.into_split();
-        ws.writer_loop(close_rx, ctrl_rx, data_rx, writer);
+        let (reader, writer) = tokio::io::split(stream);
+        Self::writer_loop(close_rx, ctrl_rx, data_rx, writer);
         ws.ping_loop(30, ctrl_tx.clone(), close_tx.clone(), event_tx.clone());
         ws.reader_loop(reader, ctrl_tx, close_tx, event_tx);
-
         ws
     }
 
@@ -112,11 +128,10 @@ impl<R: RolePolicy> WebSocket<R> {
         Ok(())
     }
 
-    /// Send a close frame, with [`CloseReason::Normal`].
+    /// Request close from peer and close the connection.
     pub async fn close(&mut self) { self.close_reason(CloseReason::Normal, "").await; }
 
-    /// Send close frame with a [`CloseReason`] and text.
-    pub async fn close_reason(&mut self, reason: CloseReason, text: &'static str) {
+    async fn close_reason(&mut self, reason: CloseReason, text: &'static str) {
         if !self.inner.closing.swap(true, Ordering::AcqRel) {
             let _ = self
                 .close_tx
@@ -138,26 +153,65 @@ impl<R: RolePolicy> WebSocket<R> {
             .await
     }
 
-    /// Get the peer's address.
+    /// Returns the peer socket address.
     #[must_use]
     pub fn peer_addr(&self) -> SocketAddr { self.peer_addr }
 
-    /// Get the local address.
+    /// Returns the local socket address.
     #[must_use]
     pub fn local_addr(&self) -> SocketAddr { self.local_addr }
 
-    /// Average latency in ms from last 5 pings
+    /// Returns the average latency in ms from last 5 pings
     #[must_use]
     pub async fn latency(&self) -> Option<u16> { self.inner.ping_stats.lock().await.average() }
 
-    /// Wait for the next [`Event`].
+    /// Wait for and return the next [`Event`].
     pub async fn recv(&mut self) -> Option<Event> { self.event_rx.recv().await }
 
-    /// Wait for the next [`Event`] with timeout.
+    /// Wait for and return the next [`Event`] with a given timeout.
     pub async fn recv_timeout(&mut self, timeout: Duration) -> Option<Event> {
         tokio::time::timeout(timeout, self.event_rx.recv())
             .await
             .unwrap_or_default()
+    }
+
+    /// Start a recv loop which handles the events with a [`MessageHandler`]
+    pub async fn recv_loop<H: MessageHandler>(&mut self, handler: Arc<H>) {
+        // start a loop to handle events from this client
+        while let Some(event) = self.event_rx.recv().await {
+            match event {
+                Event::Message(msg) => match msg {
+                    Message::Text(s) => {
+                        self.handle_ws_message(handler.on_text(s).await).await;
+                    }
+                    Message::Binary(b) => {
+                        self.handle_ws_message(handler.on_binary(b).await).await;
+                    }
+                },
+                Event::Closed => {
+                    handler.on_close().await;
+                    break;
+                }
+                Event::Error(e) => handler.on_error(e.0).await,
+                Event::Pong(latency) => handler.on_pong(latency).await,
+            }
+        }
+    }
+
+    async fn handle_ws_message(&mut self, msg: Option<WsMessage>) {
+        match msg {
+            Some(WsMessage::Text(s)) => {
+                if let Err(e) = self.send_text(&s).await {
+                    tracing::error!(e = ?e, "failed to send text message");
+                }
+            }
+            Some(WsMessage::Binary(b)) => {
+                if let Err(e) = self.send_bytes(&b).await {
+                    tracing::error!(e = ?e, "failed to send binary message");
+                }
+            }
+            None => {}
+        }
     }
 
     pub(crate) fn hash_key(s: &str) -> String {
@@ -190,33 +244,37 @@ impl<R: RolePolicy> WebSocket<R> {
         }
     }
 
-    pub(crate) fn writer_loop(
-        &self,
+    pub(crate) fn writer_loop<S: AsyncWrite + Send + 'static>(
         mut close_rx: Receiver<Vec<u8>>,
         mut ctrl_rx: Receiver<Vec<u8>>,
         mut data_rx: Receiver<Vec<u8>>,
-        mut writer: OwnedWriteHalf,
+        mut writer: WriteHalf<S>,
     ) {
-        let inner = self.inner.clone();
         tokio::spawn(async move {
             loop {
-                if inner.closing.load(Ordering::Acquire) {
-                    tracing::trace!("socket closing, stopping writer loop");
-                    break;
-                }
                 tokio::select! {
                     biased;
                      Some(close) = close_rx.recv() => {
-                         writer.write_all(&close).await.unwrap();
-                         writer.flush().await.unwrap();
+                         let _ = writer.write_all(&close).await;
+                         let _ = writer.flush().await;
+                         if let Err(e) = writer.shutdown().await{
+                             tracing::warn!(e = ?e, "stream shutdown");
+                         }
+                         tracing::trace!("TLS shutdown sent");
+                         break;
+
                      }
                     Some(ctrl) = ctrl_rx.recv() => {
-                        writer.write_all(&ctrl).await.unwrap();
-                        writer.flush().await.unwrap();
+                        if writer.write_all(&ctrl).await.is_err()
+                            || writer.flush().await.is_err() {
+                            break;
+                        }
                     }
                     Some(data) = data_rx.recv() => {
-                        writer.write_all(&data).await.unwrap();
-                        writer.flush().await.unwrap();
+                        if writer.write_all(&data).await.is_err()
+                            || writer.flush().await.is_err() {
+                                break;
+                        }
                     }
                     else => break
                 }
@@ -272,9 +330,9 @@ impl<R: RolePolicy> WebSocket<R> {
         });
     }
 
-    pub(crate) fn reader_loop(
+    pub(crate) fn reader_loop<S: AsyncRead + Send + 'static>(
         &self,
-        mut reader: OwnedReadHalf,
+        mut reader: ReadHalf<S>,
         ctrl_tx: Sender<Vec<u8>>,
         close_tx: Sender<Vec<u8>>,
         event_tx: Sender<Event>,

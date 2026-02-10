@@ -2,11 +2,12 @@ use std::sync::{Arc, atomic::Ordering};
 
 use tokio::sync::mpsc::Sender;
 
-use super::Inner;
+use super::{Inner, Message, PartialMessage};
 use crate::{
-    CloseReason, Event, MAX_MESSAGE_SIZE,
+    Event, MAX_MESSAGE_SIZE,
+    error::CloseReason,
     frames::{ControlFrame, DecodedFrame, Opcode},
-    protocol::{Message, PartialMessage, PongError},
+    protocol::PongError,
     role::RolePolicy,
 };
 
@@ -93,7 +94,7 @@ async fn handle_close<R: RolePolicy>(
 
     let reason = match code {
         // codes that should never touch the wire
-        CloseReason::RSV | CloseReason::NoneGiven | CloseReason::Abnormal | CloseReason::TLS => {
+        CloseReason::Rsv | CloseReason::NoneGiven | CloseReason::Abnormal | CloseReason::Tls => {
             CloseReason::ProtoError
         }
         // we dont echo any codes back, jsut reply with normal

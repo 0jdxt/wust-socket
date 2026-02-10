@@ -20,7 +20,7 @@ struct Args {
 }
 
 impl Args {
-    fn as_url(&self) -> String { format!("ws://{}:{}", self.addr, self.port) }
+    fn as_url(&self) -> String { format!("wss://{}:{}", self.addr, self.port) }
 }
 
 #[tokio::main]
@@ -44,18 +44,9 @@ async fn main() -> Result<(), SendError<Vec<u8>>> {
 
     for _ in 0..2 {
         let mut ws = WebSocketClient::connect(&url).await.expect("connect");
-        let json = format!(
-            "[\"sendframe\", \
-            {{\
-                 \"payload\": \"{LOREM}\",\
-                 \"opcode\": 1,\
-                 \"chopsize\": 10\
-             }}]"
-        );
 
-        // ws.send_text(&json).await?;
         ws.send_text(&data).await?;
-        // ws.send_text(LOREM).await?;
+        ws.send_text(LOREM).await?;
 
         while let Some(e) = ws.recv_timeout(Duration::from_secs(1)).await {
             match e {

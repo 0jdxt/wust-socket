@@ -9,11 +9,14 @@ mod role;
 mod server;
 mod ws;
 
+/// This is a re-export of [`async_trait::async_trait`]
+///
+/// extra context
+pub use async_trait::async_trait;
 pub use client::WebSocketClient;
-pub use error::{CloseReason, UpgradeError};
-pub use protocol::Message;
-pub use server::{MessageHandler, ServerConn, WebSocketServer};
-pub use ws::{Event, WebSocket};
+pub use error::UpgradeError;
+pub use server::WebSocketServer;
+pub use ws::{Event, Message, MessageHandler, WebSocket, WsMessage};
 
 pub(crate) const MAX_FRAME_PAYLOAD: usize = 16 * 1024 * 1024; // 16M
 pub(crate) const MAX_MESSAGE_SIZE: usize = MAX_FRAME_PAYLOAD;

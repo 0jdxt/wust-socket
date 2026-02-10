@@ -2,7 +2,7 @@
 /// [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html#section-7.4)
 #[repr(u16)]
 #[derive(Debug)]
-pub enum CloseReason {
+pub(crate) enum CloseReason {
     /// Normal close
     Normal = 1000,
     /// Going away
@@ -12,7 +12,7 @@ pub enum CloseReason {
     /// Unsupported data type
     DataType = 1003,
     /// Reserved code, should never be seen
-    RSV = 1004,
+    Rsv = 1004,
     /// No reason code provided
     NoneGiven = 1005,
     /// Abnormal closure
@@ -28,7 +28,7 @@ pub enum CloseReason {
     /// An unexpected condition that prevented the request from being fulfilled
     Unexpected = 1011,
     /// TLS error
-    TLS = 1015,
+    Tls = 1015,
     /// Other valid codes with unknown meanings
     Unknown = 4000, // private use code
 }
@@ -45,7 +45,7 @@ impl From<[u8; 2]> for CloseReason {
             1001 => CloseReason::GoingAway,
             1002 => CloseReason::ProtoError,
             1003 => CloseReason::DataType,
-            1004 => CloseReason::RSV,
+            1004 => CloseReason::Rsv,
             1005 => CloseReason::NoneGiven,
             1006 => CloseReason::Abnormal,
             1007 => CloseReason::DataError,
@@ -53,7 +53,7 @@ impl From<[u8; 2]> for CloseReason {
             1009 => CloseReason::TooBig,
             1010 => CloseReason::Extension,
             1011 => CloseReason::Unexpected,
-            1015 => CloseReason::TLS,
+            1015 => CloseReason::Tls,
             _ => CloseReason::Unknown,
         }
     }
@@ -92,4 +92,6 @@ pub enum UpgradeError {
     Connect,
     /// Attempt to connect timed out.
     Timeout,
+    /// Protocol mismatch
+    Protocol,
 }

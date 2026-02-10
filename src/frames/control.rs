@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use super::Opcode;
-use crate::{role::RolePolicy, CloseReason};
+use crate::{error::CloseReason, role::RolePolicy};
 
 // -- FAST PATH --
 // Separate ControlFrame struct to allow a fast path for sending single frames (Ping, Pong, Close) which
