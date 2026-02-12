@@ -191,12 +191,22 @@ impl WebSocket<Server> {
 
         let accept_key = Self::hash_key(key);
 
-        let response = format!(
+        let mut response = format!(
             "HTTP/1.1 101 Switching Protocols\r\n\
              Upgrade: websocket\r\n\
              Connection: Upgrade\r\n\
-             Sec-WebSocket-Accept: {accept_key}\r\n\r\n",
+             Sec-WebSocket-Accept: {accept_key}\r\n",
         );
+
+        let mut compressed = false;
+        // TODO: parse properly
+        let use_context = false; // default is true
+        if let Some(value) = headers.get("sec-websocket-extensions") {
+            println!("{value}");
+            compressed = true;
+            response.push_str("Sec-WebSocket-Extensions: permessage-deflate; client_no_context_takeover; server_no_context_takeover\r\n");
+        }
+        response.push_str("\r\n");
 
         let mut stream = reader.into_inner();
         stream
@@ -206,6 +216,12 @@ impl WebSocket<Server> {
         stream.flush().await.map_err(|_| UpgradeError::Write)?;
 
         tracing::info!(addr = ?local_addr, "upgraded client");
-        Ok(Self::from_stream(stream, local_addr, peer_addr))
+        Ok(Self::from_stream(
+            stream,
+            local_addr,
+            peer_addr,
+            compressed,
+            use_context,
+        ))
     }
 }

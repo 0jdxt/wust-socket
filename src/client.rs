@@ -32,7 +32,7 @@ impl WebSocketClient {
     /// host is either a domain name or IP address.
     /// # Errors
     /// Fails if unable to connect to the peer.
-    pub async fn connect(input: &str) -> Result<Self> {
+    pub async fn connect(input: &str, compressed: bool) -> Result<Self> {
         // url metadata
         let url = url::Url::parse(input).map_err(|_| UpgradeError::InvalidUrl)?;
         let host = url.host_str().ok_or(UpgradeError::InvalidUrl)?;
@@ -56,7 +56,7 @@ impl WebSocketClient {
         if url.scheme() == "ws" {
             // standard TCP
             tracing::info!("attempting insecure upgrade");
-            Self::try_upgrade(stream, ctx).await
+            Self::try_upgrade(stream, ctx, compressed).await
         } else if url.scheme() == "wss" {
             // TCP with TLS
 
@@ -75,7 +75,7 @@ impl WebSocketClient {
                 .await
                 .map_err(|_| UpgradeError::Connect)?;
             tracing::info!("attempting TLS upgrade");
-            Self::try_upgrade(stream, ctx).await
+            Self::try_upgrade(stream, ctx, compressed).await
         } else {
             tracing::error!("invalid scheme");
             Err(UpgradeError::InvalidUrl)
@@ -86,29 +86,34 @@ impl WebSocketClient {
     /// more information.
     /// # Errors
     /// Fails if unable to connect to the peer or timeout has elapsed.
-    pub async fn connect_timeout(input: &str, timeout: Duration) -> Result<Self> {
-        let fut = Self::connect(input);
+    pub async fn connect_timeout(input: &str, timeout: Duration, compressed: bool) -> Result<Self> {
+        let fut = Self::connect(input, compressed);
         match tokio::time::timeout(timeout, fut).await {
             Ok(Ok(s)) => Ok(s),
             _ => Err(UpgradeError::Timeout),
         }
     }
 
-    async fn try_upgrade<S>(mut stream: S, ctx: ClientContext<'_>) -> Result<Self>
+    async fn try_upgrade<S>(mut stream: S, ctx: ClientContext<'_>, compressed: bool) -> Result<Self>
     where
         S: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static,
     {
         let sec_websocket_key = BASE64.encode(rand::random::<[u8; 16]>());
 
-        let req = format!(
+        let mut req = format!(
             "GET {} HTTP/1.1\r\n\
             Host: {}:{}\r\n\
             Upgrade: websocket\r\n\
             Connection: Upgrade\r\n\
             Sec-WebSocket-Key: {sec_websocket_key}\r\n\
-            Sec-WebSocket-Version: 13\r\n\r\n",
+            Sec-WebSocket-Version: 13\r\n",
             ctx.path, ctx.host, ctx.port
         );
+        if compressed {
+            req.push_str("Sec-WebSocket-Extensions: permessage-deflate\r\n");
+        }
+        req.push_str("\r\n");
+
         // send upgrade request
         stream
             .write_all(req.as_bytes())
@@ -154,11 +159,17 @@ impl WebSocketClient {
         let expected_accept = Self::hash_key(&sec_websocket_key);
         Self::validate_header(&headers, "sec-websocket-accept", &expected_accept)?;
 
+        // TODO: parse context and compression from headers
+        let compressed = true;
+        let use_context = false;
+
         tracing::info!(addr = ?ctx.peer_addr, "successfully connected to peer");
         Ok(Self::from_stream(
             reader.into_inner(),
             ctx.local_addr,
             ctx.peer_addr,
+            compressed,
+            use_context,
         ))
     }
 }

@@ -11,6 +11,7 @@ pub(crate) struct DecodedFrame {
     pub(crate) opcode: Opcode,
     pub(crate) payload: Vec<u8>,
     pub(crate) is_fin: bool,
+    pub(crate) compressed: bool,
 }
 
 #[derive(Debug)]
@@ -29,6 +30,7 @@ pub(crate) struct FrameDecoder<P: RolePolicy> {
     buf: VecDeque<u8>,
     state: DecodeState,
     ctx: DecodeContext,
+    compressed: bool,
     _p: PhantomData<P>,
 }
 
@@ -47,10 +49,11 @@ struct DecodeContext {
     opcode: Opcode,
     payload_len: usize,
     mask_key: [u8; 4],
+    compressed: bool,
 }
 
 impl<P: RolePolicy> FrameDecoder<P> {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(compressed: bool) -> Self {
         Self {
             buf: VecDeque::new(),
             state: DecodeState::Header1,
@@ -59,7 +62,9 @@ impl<P: RolePolicy> FrameDecoder<P> {
                 opcode: Opcode::Cont,
                 payload_len: 0,
                 mask_key: [0, 0, 0, 0],
+                compressed: false,
             },
+            compressed,
             _p: PhantomData,
         }
     }
@@ -113,6 +118,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
                         opcode: self.ctx.opcode,
                         payload,
                         is_fin: self.ctx.is_fin,
+                        compressed: self.ctx.compressed,
                     })));
                 }
             };
@@ -128,17 +134,16 @@ impl<P: RolePolicy> FrameDecoder<P> {
     fn parse_header1(&mut self, b: u8) -> Result<DecodeState> {
         // 0   | 1 2 3 | 4 5 6 7
         // Fin | Rsv   | Opcode
+        let rsv = b & 0b0011_0000 > 0;
+        let compressed = b & 0b0100_0000 > 0;
+        if rsv || compressed && !self.compressed {
+            tracing::warn!("invalid RSV bits");
+            return Err(FrameParseError::ProtoError);
+        }
+
         self.ctx = DecodeContext {
-            // extract FIN and RSV at the same time since any case
-            // where the masked value isnt 10000000 or 0, RSV is violated
-            is_fin: match b & 0b1111_0000 {
-                0b1000_0000 => true,
-                0b0000_0000 => false,
-                _ => {
-                    tracing::trace!("invalid RSV bits");
-                    return Err(FrameParseError::ProtoError);
-                }
-            },
+            is_fin: b & 0b1000_0000 > 0,
+            compressed,
             opcode: Opcode::try_from(b & 0b1111).map_err(|()| {
                 tracing::trace!("invalid opcode");
                 FrameParseError::ProtoError
@@ -166,9 +171,13 @@ impl<P: RolePolicy> FrameDecoder<P> {
         }
 
         self.ctx.payload_len = (b & 0b0111_1111) as usize;
-        // Validate control frame size
-        if self.ctx.opcode.is_control() && (!self.ctx.is_fin || self.ctx.payload_len > 125) {
-            tracing::trace!("fragmented control frame received");
+
+        // Validate control frames
+        if self.ctx.opcode.is_control()
+            // must be FIN, not compressed and max 125B payload
+            && (!self.ctx.is_fin || self.ctx.compressed || self.ctx.payload_len > 125)
+        {
+            tracing::trace!("invalid control frame received");
             return Err(FrameParseError::ProtoError);
         }
 
@@ -346,7 +355,7 @@ mod tests {
             let payload = payload_strategy(opcode).new_tree(&mut TestRunner::default()).unwrap().current();
 
             let frame_bytes = build_frame_bytes(opcode, &payload, fin, mask);
-            let mut decoder = FrameDecoder::<Client>::new();
+            let mut decoder = FrameDecoder::<Client>::new(false);
             decoder.push_bytes(&frame_bytes);
 
             match decoder.next_frame() {
@@ -363,7 +372,7 @@ mod tests {
 
         #[test]
         fn fuzz_decoder(buf in vec(any::<u8>(), 0..2048)) {
-            let mut fd = FrameDecoder::<Client>::new();
+            let mut fd = FrameDecoder::<Client>::new(false);
             fd.push_bytes(&buf);
 
             while let Ok(Some(state)) = fd.next_frame() {
@@ -429,7 +438,7 @@ mod bench {
         T: RolePolicy,
     {
         let frame = make_test_frame::<T>(payload_len);
-        let mut decoder = FrameDecoder::<T>::new();
+        let mut decoder = FrameDecoder::<T>::new(false);
         b.iter(|| {
             decoder.push_bytes(black_box(&frame));
             loop {

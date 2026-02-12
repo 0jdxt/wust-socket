@@ -37,7 +37,7 @@ struct EchoHandler;
 #[async_trait::async_trait]
 impl MessageHandler for EchoHandler {
     async fn on_text(&self, s: String) -> Option<WsMessage> {
-        let l = s.ceil_char_boundary(10);
+        let l = s.ceil_char_boundary(20);
         println!("got message T {} {:?}", s.len(), &s[..l]);
         Some(WsMessage::Text(s))
     }
@@ -49,7 +49,7 @@ impl MessageHandler for EchoHandler {
     }
 
     async fn on_close(&self) {
-        println!("client closed");
+        println!("------ client closed");
     }
 
     async fn on_error(&self, e: Vec<u8>) {

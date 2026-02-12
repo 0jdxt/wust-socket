@@ -1,11 +1,11 @@
-use std::marker::PhantomData;
+use std::{io::Write, marker::PhantomData};
+
+use flate2::write::DeflateEncoder;
 
 use super::Opcode;
 use crate::{role::RolePolicy, MAX_FRAME_PAYLOAD, MAX_MESSAGE_SIZE};
 
-// -- SLOW PATH --
-// DataFrames may be fragmented or very large hence they need extra processing compared to
-// ControlFrames
+// DataFrames may be fragmented or very large hence they need extra processing compared to ControlFrames
 #[derive(Debug)]
 pub(crate) struct DataFrame<'a, P: RolePolicy> {
     opcode: Opcode,
@@ -22,39 +22,71 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
         }
     }
 
-    pub(crate) fn encode(self) -> Vec<Vec<u8>> {
+    pub(crate) fn encode(
+        self,
+        deflater: &mut Option<DeflateEncoder<Vec<u8>>>,
+        use_context: bool,
+    ) -> Vec<Vec<u8>> {
+        if let Some(deflater) = deflater {
+            if !use_context {
+                deflater.reset(vec![]).unwrap();
+            }
+            deflater.write_all(self.payload).unwrap();
+            deflater.flush().unwrap();
+            deflater.flush().unwrap();
+
+            let mut b = deflater.get_ref().clone();
+            if use_context && b.len() >= 4 {
+                b.truncate(b.len() - 4);
+            }
+            self.all_frames(&b, true)
+        } else {
+            self.all_frames(self.payload, false)
+        }
+    }
+
+    fn all_frames(&self, payload: &[u8], compressed: bool) -> Vec<Vec<u8>> {
         let mut first = true;
         let mut chunks = Vec::with_capacity(MAX_MESSAGE_SIZE.div_ceil(MAX_FRAME_PAYLOAD));
 
-        // TODO: if remainder empty set last frame properly
-        let (chunked, remainder) = self.payload.as_chunks::<MAX_FRAME_PAYLOAD>();
+        // TODO: if remainder empty, set last frame properly
+        let (chunked, remainder) = payload.as_chunks::<MAX_FRAME_PAYLOAD>();
 
         for chunk in chunked {
-            chunks.push(self.single_frame(chunk, &mut first, false));
+            chunks.push(self.single_frame(chunk, &mut first, false, compressed));
         }
-        chunks.push(self.single_frame(remainder, &mut first, true));
+        chunks.push(self.single_frame(remainder, &mut first, true, compressed));
 
         chunks
     }
 
-    fn single_frame(&self, chunk: &[u8], first: &mut bool, last: bool) -> Vec<u8> {
+    fn single_frame(
+        &self,
+        chunk: &[u8],
+        first: &mut bool,
+        last: bool,
+        compressed: bool,
+    ) -> Vec<u8> {
         tracing::info!(
             opcode = ?self.opcode,
             len = chunk.len(),
             first = first,
             fin = last,
+            compressed = compressed,
             "encoding DATA"
         );
 
-        // Set OPCODE and FIN
-        let opcode = if *first {
-            *first = false;
-            self.opcode
-        } else {
-            Opcode::Cont
-        } as u8;
+        // if first, opcode, else CONT
+        let mut b1 = if *first { self.opcode } else { Opcode::Cont } as u8;
+        // set FIN if last
+        b1 |= if last { 0b1000_0000 } else { 0 };
+        // set RSV1 if first and compressed
+        b1 |= if *first && compressed { 0b0100_0000 } else { 0 };
+        // NB: only change once we are done with first
+        *first = false;
+
         let mut buf = Vec::with_capacity(chunk.len() + 14);
-        buf.push(if last { 0x80 } else { 0 } | opcode);
+        buf.push(b1);
 
         // push LEN
         #[allow(clippy::cast_possible_truncation)]
@@ -109,7 +141,7 @@ mod bench {
         let payload = make_payload(payload_len);
         b.iter(|| {
             let frame = DataFrame::<P>::new(&payload, Opcode::Text);
-            let chunks = black_box(frame.encode());
+            let chunks = black_box(frame.encode(&mut None, false));
             black_box(chunks.len()); // consume so compiler can't optimize away
         });
     }

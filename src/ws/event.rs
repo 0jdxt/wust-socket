@@ -1,3 +1,6 @@
+use std::io::Write;
+
+use flate2::write::DeflateDecoder;
 use tokio::sync::mpsc::error::SendError;
 
 /// `Event`s are produced by [`WebSocketClient::recv`](crate::WebSocketClient::recv)
@@ -63,15 +66,47 @@ pub(crate) enum PartialMessage {
 }
 
 impl PartialMessage {
+    pub(crate) fn text() -> Self { Self::Text(vec![]) }
+
+    pub(crate) fn binary() -> Self { Self::Binary(vec![]) }
+
     pub(crate) fn push_bytes(&mut self, bytes: &[u8]) {
         match self {
-            Self::Text(buf) | Self::Binary(buf) => buf.extend_from_slice(bytes),
+            Self::Text(v) | Self::Binary(v) => v.extend(bytes),
         }
     }
 
     pub(crate) fn len(&self) -> usize {
         match self {
-            Self::Text(buf) | Self::Binary(buf) => buf.len(),
+            Self::Text(v) | Self::Binary(v) => v.len(),
+        }
+    }
+
+    pub(crate) fn into_message(
+        self,
+        inflater: &mut Option<DeflateDecoder<Vec<u8>>>,
+        use_context: bool,
+    ) -> Option<Message> {
+        let (mut data, text) = match self {
+            Self::Text(v) => (v, true),
+            Self::Binary(v) => (v, false),
+        };
+
+        if let Some(inflater) = inflater {
+            if use_context {
+                data.extend_from_slice(&[0, 0, 0xFF, 0xFF]);
+            } else {
+                inflater.reset(vec![]).unwrap();
+            }
+            inflater.write_all(&data).unwrap();
+            inflater.flush().unwrap();
+            data.clone_from(inflater.get_ref());
+        }
+
+        if text {
+            String::from_utf8(data).map(Message::Text).ok()
+        } else {
+            Some(Message::Binary(data))
         }
     }
 }

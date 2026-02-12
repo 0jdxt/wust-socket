@@ -1,8 +1,9 @@
 use std::sync::{Arc, atomic::Ordering};
 
+use flate2::write::DeflateDecoder;
 use tokio::sync::mpsc::Sender;
 
-use super::{Inner, Message, PartialMessage};
+use super::{Inner, PartialMessage};
 use crate::{
     Event, MAX_MESSAGE_SIZE,
     error::CloseReason,
@@ -18,10 +19,17 @@ pub(super) async fn handle_frame<R: RolePolicy>(
     close_tx: &Sender<Vec<u8>>,
     ctrl_tx: &Sender<Vec<u8>>,
     event_tx: &Sender<Event>,
+    inflater: &mut Option<DeflateDecoder<Vec<u8>>>,
 ) -> Option<()> {
+    tracing::trace!(
+        "got frame {:?} {} fin={}",
+        frame.opcode,
+        frame.payload.len(),
+        frame.is_fin
+    );
     match frame.opcode {
         Opcode::Text | Opcode::Bin | Opcode::Cont => {
-            handle_data::<R>(frame, partial_msg, close_tx, event_tx).await?;
+            handle_data::<R>(frame, partial_msg, close_tx, event_tx, inflater).await?;
         }
         Opcode::Pong => handle_pong::<R>(frame, close_tx, event_tx, inner).await,
         Opcode::Ping => handle_ping::<R>(frame, ctrl_tx).await,
@@ -90,8 +98,6 @@ async fn handle_close<R: RolePolicy>(
         CloseReason::from([frame.payload[0], frame.payload[1]])
     };
 
-    tracing::info!(reason=?code, "recieved Close frame");
-
     let reason = match code {
         // codes that should never touch the wire
         CloseReason::Rsv | CloseReason::NoneGiven | CloseReason::Abnormal | CloseReason::Tls => {
@@ -100,10 +106,17 @@ async fn handle_close<R: RolePolicy>(
         // we dont echo any codes back, jsut reply with normal
         _ => CloseReason::Normal,
     };
-    tracing::trace!(reason=?code, "sending Close frame");
+
+    let Ok(text) = str::from_utf8(&frame.payload[2..]) else {
+        let f = ControlFrame::<R>::close_reason(CloseReason::ProtoError, "!invalid close message");
+        let _ = close_tx.send(f).await;
+        return;
+    };
+    tracing::info!(reason=?code, text=text, "recieved Close frame");
 
     // if not already closing try to send close frame, log err
     if !inner.closing.swap(true, Ordering::AcqRel) {
+        tracing::trace!(reason=?reason, "sending Close frame");
         let f = ControlFrame::<R>::close_reason(reason, "peer closed");
         if let Err(e) = close_tx.send(f).await {
             tracing::warn!("Err: error sending close: {e}");
@@ -118,6 +131,7 @@ async fn handle_data<R: RolePolicy>(
     partial_msg: &mut Option<PartialMessage>,
     close_tx: &Sender<Vec<u8>>,
     event_tx: &Sender<Event>,
+    inflater: &mut Option<DeflateDecoder<Vec<u8>>>,
 ) -> Option<()> {
     // TODO: Leniency
     // allow overwriting partial messages
@@ -128,14 +142,14 @@ async fn handle_data<R: RolePolicy>(
         "handling message"
     );
     let partial = match (partial_msg.as_mut(), frame.opcode) {
-        (None, Opcode::Text) => partial_msg.insert(PartialMessage::Text(vec![])),
-        (None, Opcode::Bin) => partial_msg.insert(PartialMessage::Binary(vec![])),
-        (Some(p), Opcode::Cont) => p,
+        (None, Opcode::Text) => partial_msg.insert(PartialMessage::text()),
+        (None, Opcode::Bin) => partial_msg.insert(PartialMessage::binary()),
+        // CONT frames must NEVER set RSV1
+        (Some(p), Opcode::Cont) if !frame.compressed => p,
         _ => {
             // if we get a CONT before TEXT or BINARY
             // or we get TEXT/BINARY without finishing the last message
             // close the connection
-
             let _ = close_tx
                 .send(ControlFrame::<R>::close_reason(
                     CloseReason::ProtoError,
@@ -156,37 +170,31 @@ async fn handle_data<R: RolePolicy>(
         return None;
     }
 
-    partial.push_bytes(&frame.payload);
     tracing::trace!(
         current_len = partial.len(),
         added = frame.payload.len(),
         "message fragment appended"
     );
+    partial.push_bytes(&frame.payload);
 
     if frame.is_fin {
-        let msg = match partial_msg.take().unwrap() {
-            PartialMessage::Binary(buf) => Message::Binary(buf),
-            PartialMessage::Text(buf) => {
-                // if invalid UTF-8 immediately close connection
-                if let Ok(s) = String::from_utf8(buf) {
-                    Message::Text(s)
-                } else {
-                    let _ = close_tx
-                        .send(ControlFrame::<R>::close_reason(
-                            CloseReason::DataError,
-                            "Invalid UTF-8",
-                        ))
-                        .await;
-                    return None;
-                }
-            }
-        };
-        tracing::debug!(
-            opcode = ?frame.opcode,
-            total_len = msg.len(),
-            "message assembly complete"
-        );
-        let _ = event_tx.send(Event::Message(msg)).await;
+        // TODO: reuse context
+        if let Some(msg) = partial_msg.take().unwrap().into_message(inflater, false) {
+            tracing::info!(
+                opcode = ?frame.opcode,
+                total_len = msg.len(),
+                "message assembly complete"
+            );
+            let _ = event_tx.send(Event::Message(msg)).await;
+        } else {
+            let _ = close_tx
+                .send(ControlFrame::<R>::close_reason(
+                    CloseReason::DataError,
+                    "Invalid UTF-8",
+                ))
+                .await;
+            return None;
+        }
     }
     Some(())
 }

@@ -9,6 +9,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use flate2::{
+    Compression,
+    write::{DeflateDecoder, DeflateEncoder},
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf},
     sync::{
@@ -36,6 +40,8 @@ pub struct WebSocket<R: RolePolicy> {
     pub(crate) event_rx: Receiver<Event>,
     pub(crate) local_addr: SocketAddr,
     pub(crate) peer_addr: SocketAddr,
+    pub(crate) deflater: Option<DeflateEncoder<Vec<u8>>>,
+    pub(crate) use_context: bool,
     pub(crate) _role: PhantomData<R>,
 }
 
@@ -69,7 +75,13 @@ impl<R: RolePolicy> Drop for WebSocket<R> {
 type Result = std::result::Result<(), SendError<Vec<u8>>>;
 
 impl<R: RolePolicy> WebSocket<R> {
-    pub(crate) fn from_stream<S>(stream: S, local_addr: SocketAddr, peer_addr: SocketAddr) -> Self
+    pub(crate) fn from_stream<S>(
+        stream: S,
+        local_addr: SocketAddr,
+        peer_addr: SocketAddr,
+        compressed: bool,
+        use_context: bool,
+    ) -> Self
     where
         S: AsyncRead + AsyncWrite + Send + 'static,
     {
@@ -94,6 +106,12 @@ impl<R: RolePolicy> WebSocket<R> {
             event_rx,
             local_addr,
             peer_addr,
+            deflater: if compressed {
+                Some(DeflateEncoder::new(vec![], Compression::fast()))
+            } else {
+                None
+            },
+            use_context,
             _role: PhantomData,
         };
 
@@ -101,7 +119,13 @@ impl<R: RolePolicy> WebSocket<R> {
         let (reader, writer) = tokio::io::split(stream);
         Self::writer_loop(close_rx, ctrl_rx, data_rx, writer);
         ws.ping_loop(30, ctrl_tx.clone(), close_tx.clone(), event_tx.clone());
-        ws.reader_loop(reader, ctrl_tx, close_tx, event_tx);
+
+        let inflater = if compressed {
+            Some(DeflateDecoder::new(vec![]))
+        } else {
+            None
+        };
+        ws.reader_loop(reader, ctrl_tx, close_tx, event_tx, inflater);
         ws
     }
 
@@ -109,20 +133,20 @@ impl<R: RolePolicy> WebSocket<R> {
     /// # Errors
     /// If the peer has disconnected or we are currently closing, this function returns an error.
     /// The error includes the value passed.
-    pub async fn send_text(&self, text: &str) -> Result {
+    pub async fn send_text(&mut self, text: &str) -> Result {
         self.send_data(text.as_bytes(), Opcode::Text).await
     }
 
     /// Sends bytes to the connected endpoint.
     /// # Errors
     /// If the peer has disconnected or we are currently closing, this function returns an error.
-    pub async fn send_bytes(&self, bytes: &[u8]) -> Result {
+    pub async fn send_bytes(&mut self, bytes: &[u8]) -> Result {
         self.send_data(bytes, Opcode::Bin).await
     }
 
-    async fn send_data(&self, bytes: &[u8], opcode: Opcode) -> Result {
+    async fn send_data(&mut self, bytes: &[u8], opcode: Opcode) -> Result {
         let f = DataFrame::<R>::new(bytes, opcode);
-        for chunk in f.encode() {
+        for chunk in f.encode(&mut self.deflater, self.use_context) {
             self.data_tx.send(chunk).await?;
         }
         Ok(())
@@ -336,14 +360,16 @@ impl<R: RolePolicy> WebSocket<R> {
         ctrl_tx: Sender<Vec<u8>>,
         close_tx: Sender<Vec<u8>>,
         event_tx: Sender<Event>,
+        mut inflater: Option<DeflateDecoder<Vec<u8>>>,
     ) {
         let inner = self.inner.clone();
         // TODO: alloc we currently allocate for every client/connection
         tokio::spawn(async move {
             let mut buf = vec![0; MAX_FRAME_PAYLOAD];
             let mut partial_msg = None;
+            // TODO: headers for Compression
 
-            let mut fd = FrameDecoder::<R>::new();
+            let mut fd = FrameDecoder::<R>::new(inflater.is_some());
             loop {
                 let n = {
                     match reader.read(&mut buf).await {
@@ -372,6 +398,7 @@ impl<R: RolePolicy> WebSocket<R> {
                                 &close_tx,
                                 &ctrl_tx,
                                 &event_tx,
+                                &mut inflater,
                             )
                             .await
                             .is_none()

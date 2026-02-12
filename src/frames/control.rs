@@ -3,9 +3,7 @@ use std::marker::PhantomData;
 use super::Opcode;
 use crate::{error::CloseReason, role::RolePolicy};
 
-// -- FAST PATH --
-// Separate ControlFrame struct to allow a fast path for sending single frames (Ping, Pong, Close) which
-// will have a payload <= 125 bytes and FIN always set.
+// Separate ControlFrame struct to allow a fast path for sending single frames (Ping, Pong, Close) which will have a payload <= 125 bytes and FIN always set.
 pub(crate) struct ControlFrame<'a, R: RolePolicy> {
     opcode: Opcode,
     payload: &'a [u8],
