@@ -165,7 +165,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
 
         let masked = (b & 0b1000_0000) > 0;
         // Servers must NOT mask message
-        if P::EXPECT_MASKED != masked {
+        if P::SERVER != masked {
             tracing::trace!("message mask violates policy");
             return Err(FrameParseError::ProtoError);
         }
@@ -183,7 +183,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
 
         Ok(Some(if self.ctx.payload_len > 125 {
             DecodeState::ExtendedLen
-        } else if P::EXPECT_MASKED {
+        } else if P::SERVER {
             DecodeState::Mask
         } else {
             DecodeState::Payload
@@ -208,7 +208,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
             })?
         };
 
-        Ok(Some(if P::EXPECT_MASKED {
+        Ok(Some(if P::SERVER {
             DecodeState::Mask
         } else {
             DecodeState::Payload
@@ -231,7 +231,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
         let mut payload: Vec<u8> = self.buf.drain(..self.ctx.payload_len).collect();
 
         // apply mask
-        if P::EXPECT_MASKED {
+        if P::SERVER {
             crate::protocol::mask(&mut payload, self.ctx.mask_key);
         }
 
@@ -351,7 +351,7 @@ mod tests {
             fin in any::<bool>(),
         ) {
 
-            let mask = Client::EXPECT_MASKED;
+            let mask = Client::SERVER;
             let payload = payload_strategy(opcode).new_tree(&mut TestRunner::default()).unwrap().current();
 
             let frame_bytes = build_frame_bytes(opcode, &payload, fin, mask);
@@ -394,34 +394,34 @@ mod bench {
     use super::*;
     use crate::role::{Client, RolePolicy, Server};
 
-    fn make_test_frame<T: RolePolicy>(payload_len: usize) -> Vec<u8> {
+    fn make_test_frame<R: RolePolicy>(payload_len: usize) -> Vec<u8> {
         let mut frame = Vec::with_capacity(2 + payload_len);
         let fin_rsv_opcode = 0b1000_0000; // FIN set, RSV=0, opcode=0 (continuation)
         frame.push(fin_rsv_opcode);
 
         if payload_len <= 125 {
             let mut second = payload_len as u8;
-            if T::EXPECT_MASKED {
+            if R::SERVER {
                 second |= 0b1000_0000;
             }
             frame.push(second);
         } else if payload_len <= 65535 {
             let mut second = 126;
-            if T::EXPECT_MASKED {
+            if R::SERVER {
                 second |= 0b1000_0000;
             }
             frame.push(second);
             frame.extend_from_slice(&(payload_len as u16).to_be_bytes());
         } else {
             let mut second = 127;
-            if T::EXPECT_MASKED {
+            if R::SERVER {
                 second |= 0b1000_0000;
             }
             frame.push(second);
             frame.extend_from_slice(&(payload_len as u64).to_be_bytes());
         }
 
-        if T::EXPECT_MASKED {
+        if R::SERVER {
             let mask_key = [1, 2, 3, 4];
             frame.extend_from_slice(&mask_key); // mask key
             for i in 0..payload_len {

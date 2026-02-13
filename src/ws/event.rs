@@ -93,14 +93,14 @@ impl PartialMessage {
         };
 
         if let Some(inflater) = inflater {
-            if use_context {
+            if !use_context {
                 data.extend_from_slice(&[0, 0, 0xFF, 0xFF]);
-            } else {
                 inflater.reset(vec![]).unwrap();
             }
+            let end = inflater.get_ref().len();
             inflater.write_all(&data).unwrap();
             inflater.flush().unwrap();
-            data.clone_from(inflater.get_ref());
+            data = inflater.get_ref()[end..].to_vec();
         }
 
         if text {

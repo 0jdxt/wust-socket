@@ -63,7 +63,7 @@ impl<'a, R: RolePolicy> ControlFrame<'a, R> {
         buf[1] = u8::try_from(self.payload.len()).expect("ControlFrame payload too large");
 
         // Clients must SEND masked
-        if R::MASK_OUTGOING {
+        if R::CLIENT {
             buf[1] |= 0x80;
             rand::fill(&mut buf[2..6]);
             for (i, b) in self.payload.iter().enumerate() {

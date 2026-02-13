@@ -1,18 +1,18 @@
 pub trait RolePolicy: Send + Sync + 'static + std::fmt::Debug {
-    const MASK_OUTGOING: bool;
-    const EXPECT_MASKED: bool;
+    const CLIENT: bool;
+    const SERVER: bool;
 }
 
 #[derive(Debug)]
 pub struct Client;
 impl RolePolicy for Client {
-    const EXPECT_MASKED: bool = false;
-    const MASK_OUTGOING: bool = true;
+    const CLIENT: bool = true;
+    const SERVER: bool = false;
 }
 
 #[derive(Debug)]
 pub struct Server;
 impl RolePolicy for Server {
-    const EXPECT_MASKED: bool = true;
-    const MASK_OUTGOING: bool = false;
+    const CLIENT: bool = false;
+    const SERVER: bool = true;
 }

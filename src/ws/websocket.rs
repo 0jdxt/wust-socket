@@ -85,7 +85,7 @@ impl<R: RolePolicy> WebSocket<R> {
     where
         S: AsyncRead + AsyncWrite + Send + 'static,
     {
-        // crate channels
+        // create channels
         const CHAN_BUF: usize = 64;
         let (event_tx, event_rx) = channel(CHAN_BUF);
         let (close_tx, close_rx) = channel(CHAN_BUF);
@@ -146,7 +146,8 @@ impl<R: RolePolicy> WebSocket<R> {
 
     async fn send_data(&mut self, bytes: &[u8], opcode: Opcode) -> Result {
         let f = DataFrame::<R>::new(bytes, opcode);
-        for chunk in f.encode(&mut self.deflater, self.use_context) {
+        let chunks = f.encode(&mut self.deflater, self.use_context);
+        for chunk in chunks {
             self.data_tx.send(chunk).await?;
         }
         Ok(())
@@ -363,11 +364,12 @@ impl<R: RolePolicy> WebSocket<R> {
         mut inflater: Option<DeflateDecoder<Vec<u8>>>,
     ) {
         let inner = self.inner.clone();
+        let use_context = self.use_context;
+
         // TODO: alloc we currently allocate for every client/connection
         tokio::spawn(async move {
             let mut buf = vec![0; MAX_FRAME_PAYLOAD];
             let mut partial_msg = None;
-            // TODO: headers for Compression
 
             let mut fd = FrameDecoder::<R>::new(inflater.is_some());
             loop {
@@ -399,6 +401,7 @@ impl<R: RolePolicy> WebSocket<R> {
                                 &ctrl_tx,
                                 &event_tx,
                                 &mut inflater,
+                                use_context,
                             )
                             .await
                             .is_none()

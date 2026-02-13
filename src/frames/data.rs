@@ -31,15 +31,16 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
             if !use_context {
                 deflater.reset(vec![]).unwrap();
             }
+
+            let end = deflater.get_ref().len();
+
             deflater.write_all(self.payload).unwrap();
             deflater.flush().unwrap();
+            // NOTE: mihgt need for bigger files
             deflater.flush().unwrap();
 
-            let mut b = deflater.get_ref().clone();
-            if use_context && b.len() >= 4 {
-                b.truncate(b.len() - 4);
-            }
-            self.all_frames(&b, true)
+            let b = &deflater.get_ref()[end..];
+            self.all_frames(b, true)
         } else {
             self.all_frames(self.payload, false)
         }
@@ -105,7 +106,7 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
         }
 
         // Clients must SEND masked
-        if P::MASK_OUTGOING {
+        if P::CLIENT {
             // set MASK bit
             buf[1] |= 0x80;
             // get random bytes and push to buf

@@ -20,6 +20,7 @@ pub(super) async fn handle_frame<R: RolePolicy>(
     ctrl_tx: &Sender<Vec<u8>>,
     event_tx: &Sender<Event>,
     inflater: &mut Option<DeflateDecoder<Vec<u8>>>,
+    use_context: bool,
 ) -> Option<()> {
     tracing::trace!(
         "got frame {:?} {} fin={}",
@@ -29,7 +30,15 @@ pub(super) async fn handle_frame<R: RolePolicy>(
     );
     match frame.opcode {
         Opcode::Text | Opcode::Bin | Opcode::Cont => {
-            handle_data::<R>(frame, partial_msg, close_tx, event_tx, inflater).await?;
+            handle_data::<R>(
+                frame,
+                partial_msg,
+                close_tx,
+                event_tx,
+                inflater,
+                use_context,
+            )
+            .await?;
         }
         Opcode::Pong => handle_pong::<R>(frame, close_tx, event_tx, inner).await,
         Opcode::Ping => handle_ping::<R>(frame, ctrl_tx).await,
@@ -132,6 +141,7 @@ async fn handle_data<R: RolePolicy>(
     close_tx: &Sender<Vec<u8>>,
     event_tx: &Sender<Event>,
     inflater: &mut Option<DeflateDecoder<Vec<u8>>>,
+    use_context: bool,
 ) -> Option<()> {
     // TODO: Leniency
     // allow overwriting partial messages
@@ -178,8 +188,11 @@ async fn handle_data<R: RolePolicy>(
     partial.push_bytes(&frame.payload);
 
     if frame.is_fin {
-        // TODO: reuse context
-        if let Some(msg) = partial_msg.take().unwrap().into_message(inflater, false) {
+        if let Some(msg) = partial_msg
+            .take()
+            .unwrap()
+            .into_message(inflater, use_context)
+        {
             tracing::info!(
                 opcode = ?frame.opcode,
                 total_len = msg.len(),

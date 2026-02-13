@@ -79,30 +79,24 @@ impl WebSocketServer {
                 }
 
                 // attempt to connect to and upgrade stream
-                let conn_res = if peeker.starts_with(b"GET ") {
-                    // if we have "GET ", it is plain TCP
-                    if insecure {
-                        tracing::info!("attempting insecure upgrade");
-                        WebSocket::<Server>::try_upgrade(stream, addr, peer).await
-                    } else {
-                        Err(UpgradeError::Protocol)
+                let conn_res = if insecure && peeker.starts_with(b"GET ") {
+                    // if we have "GET ", we try plain TCP
+                    tracing::info!("attempting insecure upgrade");
+                    WebSocket::<Server>::try_upgrade(stream, addr, peer).await
+                } else if ssl {
+                    // otherwise try to use TLS
+                    match acceptor.accept(stream).await {
+                        Ok(stream) => {
+                            tracing::info!("attempting TLS upgrade");
+                            WebSocket::<Server>::try_upgrade(stream, addr, peer).await
+                        }
+                        Err(e) => {
+                            tracing::error!(e=?e, "tls handshake");
+                            Err(UpgradeError::Connect)
+                        }
                     }
                 } else {
-                    // otherwise try to use TLS
-                    if ssl {
-                        match acceptor.accept(stream).await {
-                            Ok(stream) => {
-                                tracing::info!("attempting TLS upgrade");
-                                WebSocket::<Server>::try_upgrade(stream, addr, peer).await
-                            }
-                            Err(e) => {
-                                tracing::error!(e=?e, "tls handshake");
-                                Err(UpgradeError::Connect)
-                            }
-                        }
-                    } else {
-                        Err(UpgradeError::Protocol)
-                    }
+                    Err(UpgradeError::Protocol)
                 };
 
                 let mut ws = match conn_res {
@@ -199,14 +193,15 @@ impl WebSocket<Server> {
         );
 
         let mut compressed = false;
-        // TODO: parse properly
-        let use_context = false; // default is true
+        let mut use_context = true;
+
         if let Some(value) = headers.get("sec-websocket-extensions") {
-            println!("{value}");
-            compressed = true;
-            response.push_str("Sec-WebSocket-Extensions: permessage-deflate; client_no_context_takeover; server_no_context_takeover\r\n");
+            let (comp, ctx) = parse_extensions(&mut response, value);
+            compressed = comp;
+            use_context = ctx;
         }
         response.push_str("\r\n");
+        println!("{response}");
 
         let mut stream = reader.into_inner();
         stream
@@ -224,4 +219,58 @@ impl WebSocket<Server> {
             use_context,
         ))
     }
+}
+
+fn parse_extensions(response: &mut String, value: &str) -> (bool, bool) {
+    let mut compressed = false;
+    let mut use_context = true;
+
+    let offers = value.split(',');
+    for offer in offers {
+        let mut options = offer.split(';');
+        let Some(ext) = options.next() else {
+            continue;
+        };
+
+        if ext != "permessage-deflate" {
+            continue;
+        }
+
+        let mut client_max_bits = false;
+        let mut server_max_bits = false;
+        for option in options {
+            let option = option.trim();
+            if option == "client_no_context_takeover" || option == "server_no_context_takeover" {
+                use_context = false;
+            } else if option.starts_with("client_max_window_bits") {
+                match option.split_once('=') {
+                    None | Some((_, "15")) => client_max_bits = true,
+                    _ => break,
+                }
+            } else if option.starts_with("server_max_window_bits") {
+                match option.split_once('=') {
+                    None | Some((_, "15")) => server_max_bits = true,
+                    _ => break,
+                }
+            }
+        }
+
+        // if we get here we have a compatible offer
+        compressed = true;
+        response.push_str("Sec-WebSocket-Extensions: permessage-deflate");
+        if !use_context {
+            response.push_str("; server_no_context_takeover; client_no_context_takeover");
+            use_context = false;
+        }
+        if client_max_bits {
+            response.push_str("; client_max_window_bits=15");
+        }
+        if server_max_bits {
+            response.push_str("; server_max_window_bits=15");
+        }
+
+        response.push_str("\r\n");
+        break;
+    }
+    (compressed, use_context)
 }

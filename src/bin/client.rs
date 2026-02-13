@@ -24,7 +24,7 @@ struct Args {
 }
 
 impl Args {
-    fn as_url(&self) -> String { format!("ws://{}:{}", self.addr, self.port) }
+    fn as_url(&self) -> String { format!("wss://{}:{}", self.addr, self.port) }
 }
 
 #[tokio::main]
@@ -49,6 +49,7 @@ async fn main() -> Result<(), SendError<Vec<u8>>> {
         ws.send_bytes(chunk).await?
     }
 
+    ws.send_text(LOREM).await?;
     ws.send_text(LOREM).await?;
 
     let mut f = File::create("out.bmp").unwrap();
