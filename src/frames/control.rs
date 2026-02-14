@@ -81,7 +81,7 @@ impl<'a, R: RolePolicy> ControlFrame<'a, R> {
 mod bench {
     extern crate test;
     use paste::paste;
-    use test::{black_box, Bencher};
+    use test::{Bencher, black_box};
 
     use super::*;
     use crate::role::*;

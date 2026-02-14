@@ -3,7 +3,7 @@ use std::{io::Write, marker::PhantomData};
 use flate2::write::DeflateEncoder;
 
 use super::Opcode;
-use crate::{role::RolePolicy, MAX_FRAME_PAYLOAD, MAX_MESSAGE_SIZE};
+use crate::{MAX_FRAME_PAYLOAD, MAX_MESSAGE_SIZE, role::RolePolicy};
 
 // DataFrames may be fragmented or very large hence they need extra processing compared to ControlFrames
 #[derive(Debug)]
@@ -135,7 +135,7 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
 mod bench {
     extern crate test;
     use paste::paste;
-    use test::{black_box, Bencher};
+    use test::{Bencher, black_box};
 
     use super::*;
     use crate::role::*;

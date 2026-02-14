@@ -1,7 +1,7 @@
 use std::{array, collections::VecDeque, marker::PhantomData};
 
 use super::Opcode;
-use crate::{role::RolePolicy, MAX_FRAME_PAYLOAD};
+use crate::{MAX_FRAME_PAYLOAD, role::RolePolicy};
 
 // helper type since decoder errors return FrameParseResult
 type Result<T> = std::result::Result<T, FrameParseError>;
@@ -262,7 +262,7 @@ fn is_valid_close_payload(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use proptest::{
-        collection::{vec, VecStrategy},
+        collection::{VecStrategy, vec},
         num,
         prelude::*,
         strategy::ValueTree,
@@ -387,7 +387,7 @@ mod bench {
     #![allow(clippy::cast_possible_truncation)]
     extern crate test;
 
-    use test::{black_box, Bencher};
+    use test::{Bencher, black_box};
 
     use super::*;
     use crate::role::{Client, RolePolicy, Server};

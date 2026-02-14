@@ -1,5 +1,6 @@
 #![feature(test)]
 #![warn(clippy::all, clippy::pedantic)]
+// #![warn(missing_docs)]
 
 mod client;
 mod error;
@@ -8,7 +9,6 @@ mod protocol;
 mod role;
 mod server;
 mod ws;
-
 /// This is a re-export of [`async_trait::async_trait`]
 ///
 /// extra context
