@@ -1,6 +1,6 @@
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
-use wust_socket::{MessageHandler, UpgradeError, WebSocketServer, WsMessage};
+use wust_socket::{Message, MessageHandler, UpgradeError, WebSocketServer};
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -36,16 +36,16 @@ async fn main() -> Result<(), UpgradeError> {
 struct EchoHandler;
 #[async_trait::async_trait]
 impl MessageHandler for EchoHandler {
-    async fn on_text(&self, s: String) -> Option<WsMessage> {
+    async fn on_text(&self, s: String) -> Option<Message> {
         let l = s.ceil_char_boundary(20);
         println!("got message T {} {:?}", s.len(), &s[..l]);
-        Some(WsMessage::Text(s))
+        Some(Message::Text(s))
     }
 
-    async fn on_binary(&self, b: Vec<u8>) -> Option<WsMessage> {
+    async fn on_binary(&self, b: Vec<u8>) -> Option<Message> {
         let l = b.len().min(10);
         println!("got messsage B {} {:?}", b.len(), &b[..l]);
-        Some(WsMessage::Binary(b))
+        Some(Message::Binary(b))
     }
 
     async fn on_close(&self) {

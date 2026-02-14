@@ -1,7 +1,6 @@
 use std::io::Write;
 
 use flate2::write::DeflateDecoder;
-use tokio::sync::mpsc::error::SendError;
 
 /// `Event`s are produced by [`WebSocketClient::recv`](crate::WebSocketClient::recv)
 /// and [`WebSocketClient::recv_timeout`](crate::WebSocketClient::recv_timeout)
@@ -9,60 +8,38 @@ use tokio::sync::mpsc::error::SendError;
 pub enum Event {
     /// Pong event with its latency in milliseconds.
     Pong(u16),
-    /// A text or binary message.
-    Message(Message),
-    /// The connection to the websocket has been closed.
-    Closed,
-    /// An error sending a message, generally indicating the connection closed.
-    /// Returns the bytes that failed to send.
-    Error(SendError<Vec<u8>>),
-}
-
-/// Assembled messages recieved from an endpoint.
-#[derive(Debug)]
-pub enum Message {
     /// Valid UTF-8 message.
     Text(String),
     /// Binary message bytes.
     Binary(Vec<u8>),
+    /// The connection to the websocket has been closed.
+    Closed,
+    /// An error sending a message, generally indicating the connection closed.
+    /// Returns the bytes that failed to send.
+    Error(Vec<u8>),
 }
 
-impl Message {
-    /// If the type is `Message::Text`, returns a reference to the internal `String`, otherwise
-    /// `None`.
-    #[must_use]
-    pub fn as_str(&self) -> Option<&str> {
+impl Event {
+    pub(crate) fn len(&self) -> usize {
         match self {
-            Message::Binary(..) => None,
-            Message::Text(s) => Some(s),
+            Self::Text(s) => s.len(),
+            Self::Binary(b) => b.len(),
+            Self::Error(e) => e.len(),
+            _ => 0,
         }
     }
-
-    /// Returns a reference to the data as bytes.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        match self {
-            Message::Binary(b) => b,
-            Message::Text(s) => s.as_bytes(),
-        }
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        match self {
-            Message::Binary(b) => b.len(),
-            Message::Text(s) => s.len(),
-        }
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
 }
 
 #[derive(Debug)]
 pub(crate) enum PartialMessage {
     Text(Vec<u8>),
     Binary(Vec<u8>),
+}
+
+#[derive(Debug)]
+pub(crate) enum MessageError {
+    Utf8,
+    Deflate,
 }
 
 impl PartialMessage {
@@ -86,27 +63,34 @@ impl PartialMessage {
         self,
         inflater: &mut Option<DeflateDecoder<Vec<u8>>>,
         use_context: bool,
-    ) -> Option<Message> {
+    ) -> Result<Event, MessageError> {
         let (mut data, text) = match self {
             Self::Text(v) => (v, true),
             Self::Binary(v) => (v, false),
         };
 
         if let Some(inflater) = inflater {
-            if !use_context {
+            let end = if use_context {
+                inflater.get_ref().len()
+            } else {
                 data.extend_from_slice(&[0, 0, 0xFF, 0xFF]);
-                inflater.reset(vec![]).unwrap();
+                let _ = inflater.reset(vec![]);
+                0
+            };
+
+            if inflater.write_all(&data).is_err() {
+                return Err(MessageError::Deflate);
             }
-            let end = inflater.get_ref().len();
-            inflater.write_all(&data).unwrap();
-            inflater.flush().unwrap();
+            let _ = inflater.flush();
             data = inflater.get_ref()[end..].to_vec();
         }
 
         if text {
-            String::from_utf8(data).map(Message::Text).ok()
+            String::from_utf8(data)
+                .map(Event::Text)
+                .map_err(|_| MessageError::Utf8)
         } else {
-            Some(Message::Binary(data))
+            Ok(Event::Binary(data))
         }
     }
 }

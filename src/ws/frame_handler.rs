@@ -10,6 +10,7 @@ use crate::{
     frames::{ControlFrame, DecodedFrame, Opcode},
     protocol::PongError,
     role::RolePolicy,
+    ws::event::MessageError,
 };
 
 pub(super) async fn handle_frame<R: RolePolicy>(
@@ -128,8 +129,8 @@ async fn handle_close<R: RolePolicy>(
         tracing::trace!(reason=?reason, "sending Close frame");
         let f = ControlFrame::<R>::close_reason(reason, "peer closed");
         if let Err(e) = close_tx.send(f).await {
-            tracing::warn!("Err: error sending close: {e}");
-            let _ = event_tx.send(Event::Error(e)).await;
+            tracing::warn!("error sending close");
+            let _ = event_tx.send(Event::Error(e.0)).await;
         }
     }
 }
@@ -188,25 +189,37 @@ async fn handle_data<R: RolePolicy>(
     partial.push_bytes(&frame.payload);
 
     if frame.is_fin {
-        if let Some(msg) = partial_msg
+        match partial_msg
             .take()
             .unwrap()
             .into_message(inflater, use_context)
         {
-            tracing::info!(
-                opcode = ?frame.opcode,
-                total_len = msg.len(),
-                "message assembly complete"
-            );
-            let _ = event_tx.send(Event::Message(msg)).await;
-        } else {
-            let _ = close_tx
-                .send(ControlFrame::<R>::close_reason(
-                    CloseReason::DataError,
-                    "Invalid UTF-8",
-                ))
-                .await;
-            return None;
+            Ok(msg) => {
+                tracing::trace!(
+                    opcode = ?frame.opcode,
+                    total_len = msg.len(),
+                    "message assembly complete"
+                );
+                let _ = event_tx.send(msg).await;
+            }
+            Err(MessageError::Utf8) => {
+                let _ = close_tx
+                    .send(ControlFrame::<R>::close_reason(
+                        CloseReason::DataError,
+                        "Invalid UTF-8",
+                    ))
+                    .await;
+                return None;
+            }
+            Err(MessageError::Deflate) => {
+                let _ = close_tx
+                    .send(ControlFrame::<R>::close_reason(
+                        CloseReason::ProtoError,
+                        "bad deflate stream",
+                    ))
+                    .await;
+                return None;
+            }
         }
     }
     Some(())

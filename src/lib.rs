@@ -16,7 +16,7 @@ pub use async_trait::async_trait;
 pub use client::WebSocketClient;
 pub use error::UpgradeError;
 pub use server::WebSocketServer;
-pub use ws::{Event, Message, MessageHandler, WebSocket, WsMessage};
+pub use ws::{Event, Message, MessageHandler, WebSocket};
 
 // If using autobahn, set frames to 16M for testing
 // otherwise our real max is 16K frames

@@ -22,22 +22,23 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
         }
     }
 
+    // None return indicates protocol violation
     pub(crate) fn encode(
         self,
         deflater: &mut Option<DeflateEncoder<Vec<u8>>>,
         use_context: bool,
     ) -> Vec<Vec<u8>> {
         if let Some(deflater) = deflater {
-            if !use_context {
-                deflater.reset(vec![]).unwrap();
-            }
+            let end = if use_context {
+                deflater.get_ref().len()
+            } else {
+                let _ = deflater.reset(vec![]);
+                0
+            };
 
-            let end = deflater.get_ref().len();
-
-            deflater.write_all(self.payload).unwrap();
-            deflater.flush().unwrap();
-            // NOTE: mihgt need for bigger files
-            deflater.flush().unwrap();
+            let _ = deflater.write_all(self.payload);
+            let _ = deflater.flush();
+            let _ = deflater.flush();
 
             let b = &deflater.get_ref()[end..];
             self.all_frames(b, true)

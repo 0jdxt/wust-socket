@@ -24,7 +24,7 @@ use tokio::{
 
 use super::frame_handler::handle_frame;
 use crate::{
-    Event, MAX_FRAME_PAYLOAD, Message, UpgradeError,
+    Event, MAX_FRAME_PAYLOAD, UpgradeError,
     error::CloseReason,
     frames::{ControlFrame, DataFrame, FrameDecoder, FrameParseError, FrameState, Opcode},
     protocol::PingStats,
@@ -53,15 +53,15 @@ pub(crate) struct Inner {
 }
 
 /// Message to be sent over the websocket.
-pub enum WsMessage {
+pub enum Message {
     Text(String),
     Binary(Vec<u8>),
 }
 
 #[async_trait::async_trait]
 pub trait MessageHandler: Send + Sync + 'static {
-    async fn on_text(&self, s: String) -> Option<WsMessage>;
-    async fn on_binary(&self, b: Vec<u8>) -> Option<WsMessage>;
+    async fn on_text(&self, s: String) -> Option<Message>;
+    async fn on_binary(&self, b: Vec<u8>) -> Option<Message>;
     async fn on_close(&self);
     async fn on_error(&self, e: Vec<u8>);
     async fn on_pong(&self, latency: u16);
@@ -205,32 +205,30 @@ impl<R: RolePolicy> WebSocket<R> {
         // start a loop to handle events from this client
         while let Some(event) = self.event_rx.recv().await {
             match event {
-                Event::Message(msg) => match msg {
-                    Message::Text(s) => {
-                        self.handle_ws_message(handler.on_text(s).await).await;
-                    }
-                    Message::Binary(b) => {
-                        self.handle_ws_message(handler.on_binary(b).await).await;
-                    }
-                },
+                Event::Text(s) => {
+                    self.handle_ws_message(handler.on_text(s).await).await;
+                }
+                Event::Binary(b) => {
+                    self.handle_ws_message(handler.on_binary(b).await).await;
+                }
                 Event::Closed => {
                     handler.on_close().await;
                     break;
                 }
-                Event::Error(e) => handler.on_error(e.0).await,
+                Event::Error(e) => handler.on_error(e).await,
                 Event::Pong(latency) => handler.on_pong(latency).await,
             }
         }
     }
 
-    async fn handle_ws_message(&mut self, msg: Option<WsMessage>) {
+    async fn handle_ws_message(&mut self, msg: Option<Message>) {
         match msg {
-            Some(WsMessage::Text(s)) => {
+            Some(Message::Text(s)) => {
                 if let Err(e) = self.send_text(&s).await {
                     tracing::error!(e = ?e, "failed to send text message");
                 }
             }
-            Some(WsMessage::Binary(b)) => {
+            Some(Message::Binary(b)) => {
                 if let Err(e) = self.send_bytes(&b).await {
                     tracing::error!(e = ?e, "failed to send binary message");
                 }
@@ -334,7 +332,7 @@ impl<R: RolePolicy> WebSocket<R> {
                     let mut p = inner.ping_stats.lock().await;
                     if let Err(e) = p.new_ping::<R>(&ctrl_tx).await {
                         tracing::warn!("Ping failed, stopping ping loop.");
-                        let _ = event_tx.send(Event::Error(e)).await;
+                        let _ = event_tx.send(Event::Error(e.0)).await;
                         break;
                     }
                     ping_sent = Some(Instant::now());
