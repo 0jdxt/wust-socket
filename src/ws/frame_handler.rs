@@ -1,7 +1,6 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use flate2::write::DeflateDecoder;
-use tokio::sync::mpsc::Sender;
 
 use super::{Inner, PartialMessage};
 use crate::{
@@ -10,16 +9,14 @@ use crate::{
     frames::{ControlFrame, DecodedFrame, Opcode},
     protocol::PongError,
     role::RolePolicy,
-    ws::event::MessageError,
+    ws::{event::MessageError, websocket::WsSender},
 };
 
 pub(super) async fn handle_frame<R: RolePolicy>(
     frame: &DecodedFrame,
     inner: &Arc<Inner>,
     partial_msg: &mut Option<PartialMessage>,
-    close_tx: &Sender<Vec<u8>>,
-    ctrl_tx: &Sender<Vec<u8>>,
-    event_tx: &Sender<Event>,
+    sender: &WsSender,
     inflater: &mut Option<DeflateDecoder<Vec<u8>>>,
     use_context: bool,
 ) -> Option<()> {
@@ -31,20 +28,12 @@ pub(super) async fn handle_frame<R: RolePolicy>(
     );
     match frame.opcode {
         Opcode::Text | Opcode::Bin | Opcode::Cont => {
-            handle_data::<R>(
-                frame,
-                partial_msg,
-                close_tx,
-                event_tx,
-                inflater,
-                use_context,
-            )
-            .await?;
+            handle_data::<R>(frame, partial_msg, sender, inflater, use_context).await?;
         }
-        Opcode::Pong => handle_pong::<R>(frame, close_tx, event_tx, inner).await,
-        Opcode::Ping => handle_ping::<R>(frame, ctrl_tx).await,
+        Opcode::Pong => handle_pong::<R>(frame, sender, inner).await,
+        Opcode::Ping => handle_ping::<R>(frame, sender).await,
         Opcode::Close => {
-            handle_close::<R>(frame, inner, close_tx, event_tx).await;
+            handle_close::<R>(frame, inner, sender).await;
             return None;
         }
     }
@@ -52,31 +41,26 @@ pub(super) async fn handle_frame<R: RolePolicy>(
 }
 
 // Reply with pong
-async fn handle_ping<R: RolePolicy>(frame: &DecodedFrame, ctrl_tx: &Sender<Vec<u8>>) {
+async fn handle_ping<R: RolePolicy>(frame: &DecodedFrame, sender: &WsSender) {
     tracing::info!("received PING, scheduling PONG");
     let bytes = ControlFrame::<R>::pong(&frame.payload).encode();
-    let _ = ctrl_tx.send(bytes).await;
+    let _ = sender.ctrl(bytes).await;
 }
 
 // Try to parse payload as nonce and check it matches,
 // otherwise if latency exceeds u16::MAX ms, we close the connection
 // else its unsolicited and we ignore
-async fn handle_pong<R: RolePolicy>(
-    frame: &DecodedFrame,
-    close_tx: &Sender<Vec<u8>>,
-    event_tx: &Sender<Event>,
-    inner: &Arc<Inner>,
-) {
+async fn handle_pong<R: RolePolicy>(frame: &DecodedFrame, sender: &WsSender, inner: &Arc<Inner>) {
     tracing::debug!("received PONG");
     if let Ok(bytes) = frame.payload.as_slice().try_into() {
         match inner.ping_stats.lock().await.on_pong(bytes) {
             Ok(latency) => {
-                let _ = event_tx.send(Event::Pong(latency)).await;
+                let _ = sender.event(Event::Pong(latency)).await;
             }
             Err(PongError::Late(latency)) => {
                 tracing::warn!(latency = latency, "late pong");
-                let _ = close_tx
-                    .send(ControlFrame::<R>::close_reason(
+                let _ = sender
+                    .close(ControlFrame::<R>::close_reason(
                         CloseReason::Policy,
                         "ping timeout",
                     ))
@@ -94,12 +78,7 @@ async fn handle_pong<R: RolePolicy>(
 }
 
 // If closing, shutdown; otherwise, reply with close frame
-async fn handle_close<R: RolePolicy>(
-    frame: &DecodedFrame,
-    inner: &Arc<Inner>,
-    close_tx: &Sender<Vec<u8>>,
-    event_tx: &Sender<Event>,
-) {
+async fn handle_close<R: RolePolicy>(frame: &DecodedFrame, inner: &Arc<Inner>, sender: &WsSender) {
     // Here we parse the close reason in order to give the appropriate response.
     // If empty, treat as normal.
     let code = if frame.payload.is_empty() {
@@ -119,7 +98,7 @@ async fn handle_close<R: RolePolicy>(
 
     let Ok(text) = str::from_utf8(&frame.payload[2..]) else {
         let f = ControlFrame::<R>::close_reason(CloseReason::ProtoError, "!invalid close message");
-        let _ = close_tx.send(f).await;
+        let _ = sender.close(f).await;
         return;
     };
     tracing::info!(reason=?code, text=text, "recieved Close frame");
@@ -128,9 +107,9 @@ async fn handle_close<R: RolePolicy>(
     if !inner.closing.swap(true, Ordering::AcqRel) {
         tracing::trace!(reason=?reason, "sending Close frame");
         let f = ControlFrame::<R>::close_reason(reason, "peer closed");
-        if let Err(e) = close_tx.send(f).await {
+        if let Err(e) = sender.close(f).await {
             tracing::warn!("error sending close");
-            let _ = event_tx.send(Event::Error(e.0)).await;
+            let _ = sender.event(Event::Error(e.0)).await;
         }
     }
 }
@@ -139,8 +118,7 @@ async fn handle_close<R: RolePolicy>(
 async fn handle_data<R: RolePolicy>(
     frame: &DecodedFrame,
     partial_msg: &mut Option<PartialMessage>,
-    close_tx: &Sender<Vec<u8>>,
-    event_tx: &Sender<Event>,
+    sender: &WsSender,
     inflater: &mut Option<DeflateDecoder<Vec<u8>>>,
     use_context: bool,
 ) -> Option<()> {
@@ -161,8 +139,8 @@ async fn handle_data<R: RolePolicy>(
             // if we get a CONT before TEXT or BINARY
             // or we get TEXT/BINARY without finishing the last message
             // close the connection
-            let _ = close_tx
-                .send(ControlFrame::<R>::close_reason(
+            let _ = sender
+                .close(ControlFrame::<R>::close_reason(
                     CloseReason::ProtoError,
                     "Unexpected frame",
                 ))
@@ -172,8 +150,8 @@ async fn handle_data<R: RolePolicy>(
     };
 
     if partial.len() + frame.payload.len() > MAX_MESSAGE_SIZE {
-        let _ = close_tx
-            .send(ControlFrame::<R>::close_reason(
+        let _ = sender
+            .close(ControlFrame::<R>::close_reason(
                 CloseReason::TooBig,
                 "Message exceeded maximum size",
             ))
@@ -200,11 +178,11 @@ async fn handle_data<R: RolePolicy>(
                     total_len = msg.len(),
                     "message assembly complete"
                 );
-                let _ = event_tx.send(msg).await;
+                let _ = sender.event(msg).await;
             }
             Err(MessageError::Utf8) => {
-                let _ = close_tx
-                    .send(ControlFrame::<R>::close_reason(
+                let _ = sender
+                    .close(ControlFrame::<R>::close_reason(
                         CloseReason::DataError,
                         "Invalid UTF-8",
                     ))
@@ -212,8 +190,8 @@ async fn handle_data<R: RolePolicy>(
                 return None;
             }
             Err(MessageError::Deflate) => {
-                let _ = close_tx
-                    .send(ControlFrame::<R>::close_reason(
+                let _ = sender
+                    .close(ControlFrame::<R>::close_reason(
                         CloseReason::ProtoError,
                         "bad deflate stream",
                     ))

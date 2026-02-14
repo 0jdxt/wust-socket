@@ -70,6 +70,8 @@ impl PartialMessage {
         };
 
         if let Some(inflater) = inflater {
+            let init_size = data.len();
+
             let end = if use_context {
                 inflater.get_ref().len()
             } else {
@@ -83,6 +85,7 @@ impl PartialMessage {
             }
             let _ = inflater.flush();
             data = inflater.get_ref()[end..].to_vec();
+            tracing::trace!("inflated {init_size} => {}", data.len());
         }
 
         if text {

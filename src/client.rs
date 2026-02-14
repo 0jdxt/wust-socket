@@ -111,8 +111,8 @@ impl WebSocketClient {
         );
         if compressed {
             req.push_str("Sec-WebSocket-Extensions: permessage-deflate");
-            req.push_str("; client_no_context_takeover");
-            req.push_str("; server_no_context_takeover");
+            //req.push_str("; client_no_context_takeover");
+            //req.push_str("; server_no_context_takeover");
             req.push_str("\r\n");
         }
         req.push_str("\r\n");
@@ -164,7 +164,7 @@ impl WebSocketClient {
 
         // TODO: parse context and compression from headers
         let compressed = true;
-        let use_context = false;
+        let use_context = true;
         tracing::info!(addr = ?ctx.peer_addr, "successfully connected to peer");
         Ok(Self::from_stream(
             reader.into_inner(),

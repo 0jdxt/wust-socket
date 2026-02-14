@@ -75,7 +75,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
         tracing::trace!(
             state = ?self.state,
             buf_len = self.buf.len(),
-            "decoder step"
+            "decoder"
         );
         loop {
             let next_state = match self.state {
@@ -220,7 +220,6 @@ impl<P: RolePolicy> FrameDecoder<P> {
             return Ok(None);
         }
 
-        // send close and wait for response
         if self.ctx.payload_len > MAX_FRAME_PAYLOAD {
             self.buf.clear();
             self.state = DecodeState::Header1;
@@ -230,7 +229,6 @@ impl<P: RolePolicy> FrameDecoder<P> {
 
         let mut payload: Vec<u8> = self.buf.drain(..self.ctx.payload_len).collect();
 
-        // apply mask
         if P::SERVER {
             crate::protocol::mask(&mut payload, self.ctx.mask_key);
         }

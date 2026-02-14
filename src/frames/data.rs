@@ -29,6 +29,8 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
         use_context: bool,
     ) -> Vec<Vec<u8>> {
         if let Some(deflater) = deflater {
+            let init_size = self.payload.len();
+
             let end = if use_context {
                 deflater.get_ref().len()
             } else {
@@ -41,6 +43,8 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
             let _ = deflater.flush();
 
             let b = &deflater.get_ref()[end..];
+            tracing::trace!("deflated {init_size} -> {}", b.len());
+
             self.all_frames(b, true)
         } else {
             self.all_frames(self.payload, false)
