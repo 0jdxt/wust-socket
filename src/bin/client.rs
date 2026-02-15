@@ -24,7 +24,7 @@ struct Args {
 }
 
 impl Args {
-    fn as_url(&self) -> String { format!("wss://{}:{}", self.addr, self.port) }
+    fn as_url(&self) -> String { format!("ws://{}:{}", self.addr, self.port) }
 }
 
 #[tokio::main]

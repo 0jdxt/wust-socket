@@ -3,6 +3,7 @@ port := "6969"
 alias w:=watch
 alias s:=server
 alias c:=client
+alias a:=autobahn
 
 watch p=port:
     #!/bin/bash
@@ -15,8 +16,15 @@ watch p=port:
         SERVER_PID=$!
     done
 
-server p=port:
-    cargo r --bin server -- -p {{p}}
+autobahn:
+    just server 9001 --features=autobahn
+
+server p=port args="":
+    cargo r --bin server {{args}} -- -p {{p}}
 
 client p=port:
     cargo r --bin client -- -p {{p}}
+
+flame:
+    RUSTFLAGS="-C force-frame-pointers=yes" cargo b --release
+    sudo flamegraph --freq 999  -- ./target/release/server -p 6969
