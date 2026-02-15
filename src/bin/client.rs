@@ -39,7 +39,9 @@ async fn main() -> Result<(), SendError<Vec<u8>>> {
 
     let url = Args::parse().as_url();
 
-    let mut ws = WebSocketClient::connect(&url, true).await.expect("connect");
+    let mut ws = WebSocketClient::connect(&url, false, true)
+        .await
+        .expect("connect");
 
     ws.send_text(LOREM).await?;
     ws.send_text(LOREM).await?;

@@ -32,7 +32,7 @@ impl WebSocketClient {
     /// host is either a domain name or IP address.
     /// # Errors
     /// Fails if unable to connect to the peer.
-    pub async fn connect(input: &str, compressed: bool) -> Result<Self> {
+    pub async fn connect(input: &str, compressed: bool, use_context: bool) -> Result<Self> {
         // url metadata
         let url = url::Url::parse(input).map_err(|_| UpgradeError::InvalidUrl)?;
         let host = url.host_str().ok_or(UpgradeError::InvalidUrl)?;
@@ -56,7 +56,7 @@ impl WebSocketClient {
         if url.scheme() == "ws" {
             // standard TCP
             tracing::info!("attempting insecure upgrade");
-            Self::try_upgrade(stream, ctx, compressed).await
+            Self::try_upgrade(stream, ctx, compressed, use_context).await
         } else if url.scheme() == "wss" {
             // TCP with TLS
 
@@ -75,7 +75,7 @@ impl WebSocketClient {
                 .await
                 .map_err(|_| UpgradeError::Connect)?;
             tracing::info!("attempting TLS upgrade");
-            Self::try_upgrade(stream, ctx, compressed).await
+            Self::try_upgrade(stream, ctx, compressed, use_context).await
         } else {
             tracing::error!("invalid scheme");
             Err(UpgradeError::InvalidUrl)
@@ -86,15 +86,25 @@ impl WebSocketClient {
     /// more information.
     /// # Errors
     /// Fails if unable to connect to the peer or timeout has elapsed.
-    pub async fn connect_timeout(input: &str, timeout: Duration, compressed: bool) -> Result<Self> {
-        let fut = Self::connect(input, compressed);
+    pub async fn connect_timeout(
+        input: &str,
+        timeout: Duration,
+        compressed: bool,
+        use_context: bool,
+    ) -> Result<Self> {
+        let fut = Self::connect(input, compressed, use_context);
         match tokio::time::timeout(timeout, fut).await {
             Ok(Ok(s)) => Ok(s),
             _ => Err(UpgradeError::Timeout),
         }
     }
 
-    async fn try_upgrade<S>(mut stream: S, ctx: ClientContext<'_>, compressed: bool) -> Result<Self>
+    async fn try_upgrade<S>(
+        mut stream: S,
+        ctx: ClientContext<'_>,
+        compressed: bool,
+        use_context: bool,
+    ) -> Result<Self>
     where
         S: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static,
     {
@@ -111,8 +121,10 @@ impl WebSocketClient {
         );
         if compressed {
             req.push_str("Sec-WebSocket-Extensions: permessage-deflate");
-            //req.push_str("; client_no_context_takeover");
-            //req.push_str("; server_no_context_takeover");
+            if !use_context {
+                req.push_str("; client_no_context_takeover");
+                req.push_str("; server_no_context_takeover");
+            }
             req.push_str("\r\n");
         }
         req.push_str("\r\n");
@@ -163,8 +175,24 @@ impl WebSocketClient {
         Self::validate_header(&headers, "sec-websocket-accept", &expected_accept)?;
 
         // TODO: parse context and compression from headers
-        let compressed = true;
-        let use_context = true;
+        let mut compressed = false;
+        let mut use_context = true;
+        if let Some(ext_reply) = headers.get("sec-websocket-extensions") {
+            let mut tokens = ext_reply.split(';');
+            if tokens.next() == Some("permessage-deflate") {
+                compressed = true;
+                for token in tokens {
+                    let token = token.trim();
+                    match token {
+                        "client_no_context_takeover" | "server_no_context_takeover" => {
+                            use_context = false;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         tracing::info!(addr = ?ctx.peer_addr, "successfully connected to peer");
         Ok(Self::from_stream(
             reader.into_inner(),
