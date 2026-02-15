@@ -1,5 +1,6 @@
 use std::{io::Write, marker::PhantomData};
 
+use bytes::{BufMut, Bytes, BytesMut};
 use flate2::write::DeflateEncoder;
 
 use super::Opcode;
@@ -7,13 +8,13 @@ use crate::{role::RolePolicy, MAX_FRAME_PAYLOAD, MAX_MESSAGE_SIZE};
 
 // DataFrames may be fragmented or very large hence they need extra processing compared to ControlFrames
 #[derive(Debug)]
-pub(crate) struct DataFrame<'a, P: RolePolicy> {
+pub(crate) struct DataFrame<'a, R: RolePolicy> {
     opcode: Opcode,
     payload: &'a [u8],
-    _p: PhantomData<P>,
+    _p: PhantomData<R>,
 }
 
-impl<'a, P: RolePolicy> DataFrame<'a, P> {
+impl<'a, R: RolePolicy> DataFrame<'a, R> {
     pub(crate) fn new(payload: &'a [u8], opcode: Opcode) -> Self {
         Self {
             opcode,
@@ -27,7 +28,7 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
         self,
         deflater: &mut Option<DeflateEncoder<Vec<u8>>>,
         use_context: bool,
-    ) -> Vec<Vec<u8>> {
+    ) -> Vec<Bytes> {
         if let Some(deflater) = deflater {
             let init_size = self.payload.len();
 
@@ -51,7 +52,7 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
         }
     }
 
-    fn all_frames(&self, payload: &[u8], compressed: bool) -> Vec<Vec<u8>> {
+    fn all_frames(&self, payload: &[u8], compressed: bool) -> Vec<Bytes> {
         let mut first = true;
         let mut chunks = Vec::with_capacity(MAX_MESSAGE_SIZE.div_ceil(MAX_FRAME_PAYLOAD));
 
@@ -66,13 +67,7 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
         chunks
     }
 
-    fn single_frame(
-        &self,
-        chunk: &[u8],
-        first: &mut bool,
-        last: bool,
-        compressed: bool,
-    ) -> Vec<u8> {
+    fn single_frame(&self, chunk: &[u8], first: &mut bool, last: bool, compressed: bool) -> Bytes {
         tracing::trace!(
             opcode = ?self.opcode,
             len = chunk.len(),
@@ -91,27 +86,25 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
         // NB: only change once we are done with first
         *first = false;
 
-        let mut buf = Vec::with_capacity(chunk.len() + 14);
-        buf.push(b1);
+        let mut buf = BytesMut::with_capacity(chunk.len() + 14);
+        buf.put_u8(b1);
 
         // push LEN
         #[allow(clippy::cast_possible_truncation)]
         match chunk.len() {
-            0..=125 => {
-                buf.push(chunk.len() as u8);
-            }
+            0..=125 => buf.put_u8(chunk.len() as u8),
             126..=65535 => {
-                buf.push(126);
-                buf.extend_from_slice(&(chunk.len() as u16).to_be_bytes());
+                buf.put_u8(126);
+                buf.put_u16(chunk.len() as u16);
             }
             _ => {
-                buf.push(127);
-                buf.extend_from_slice(&(chunk.len() as u64).to_be_bytes());
+                buf.put_u8(127);
+                buf.put_u64(chunk.len() as u64);
             }
         }
 
         // Clients must SEND masked
-        if P::CLIENT {
+        if R::CLIENT {
             // set MASK bit
             buf[1] |= 0x80;
             // get random bytes and push to buf
@@ -127,7 +120,7 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
             buf.extend_from_slice(chunk);
         }
 
-        buf
+        buf.freeze()
     }
 }
 

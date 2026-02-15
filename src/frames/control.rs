@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
 
+use bytes::{BufMut, Bytes, BytesMut};
+
 use super::Opcode;
 use crate::{error::CloseReason, role::RolePolicy};
 
@@ -37,43 +39,45 @@ impl<'a, R: RolePolicy> ControlFrame<'a, R> {
         }
     }
 
-    pub(crate) fn close_reason(reason: CloseReason, text: &'static str) -> Vec<u8> {
-        let mut payload = [0; 125];
-        // push code bytes
-        let code: [u8; 2] = reason.into();
-        payload[..2].copy_from_slice(&code);
-
+    pub(crate) fn close_reason(reason: CloseReason, text: &'static str) -> Bytes {
         // limit text length to 123
         let len = text.floor_char_boundary(123);
         let bytes = &text.as_bytes()[..len];
-        payload[2..2 + len].copy_from_slice(bytes);
-        ControlFrame::<R>::close(&payload[..2 + len]).encode()
+
+        let mut buf = BytesMut::with_capacity(2 + bytes.len());
+        buf.extend_from_slice(&Into::<[u8; 2]>::into(reason));
+        buf.extend_from_slice(bytes);
+        ControlFrame::<R>::close(&buf).encode()
     }
 
     // encoding: sets Opcode, FIN, MASK and optionally masks payload
-    pub(crate) fn encode(self) -> Vec<u8> {
+    pub(crate) fn encode(self) -> Bytes {
         tracing::trace!(
             opcode = ?self.opcode,
             len = self.payload.len(),
             "encoding CTRL"
         );
 
-        let mut buf = [0; 131]; // max single frame size
-        buf[0] = self.opcode as u8 | 0x80; // always set FIN
-        buf[1] = u8::try_from(self.payload.len()).expect("ControlFrame payload too large");
+        let mut buf = BytesMut::with_capacity(self.payload.len() + 6); // max single frame size
+        buf.put_u8(self.opcode as u8 | 0x80); // always set FIN
+        #[allow(clippy::cast_possible_truncation)]
+        buf.put_u8(self.payload.len() as u8);
 
         // Clients must SEND masked
         if R::CLIENT {
             buf[1] |= 0x80;
-            rand::fill(&mut buf[2..6]);
-            for (i, b) in self.payload.iter().enumerate() {
-                buf[6 + i] = b ^ buf[2 + (i % 4)];
-            }
-            buf[..6 + self.payload.len()].to_vec()
+            let mut mask_key = [0; 4];
+            rand::fill(&mut mask_key);
+            buf.extend_from_slice(&mask_key);
+
+            let start = buf.len();
+            buf.extend_from_slice(self.payload);
+            crate::protocol::mask(&mut buf[start..], mask_key);
         } else {
-            buf[2..2 + self.payload.len()].copy_from_slice(self.payload);
-            buf[..2 + self.payload.len()].to_vec()
+            buf.extend_from_slice(self.payload);
         }
+
+        buf.freeze()
     }
 }
 
@@ -81,7 +85,7 @@ impl<'a, R: RolePolicy> ControlFrame<'a, R> {
 mod bench {
     extern crate test;
     use paste::paste;
-    use test::{Bencher, black_box};
+    use test::{black_box, Bencher};
 
     use super::*;
     use crate::role::*;

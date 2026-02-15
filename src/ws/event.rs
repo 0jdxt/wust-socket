@@ -3,6 +3,8 @@ use std::io::Write;
 use bytes::{Bytes, BytesMut};
 use flate2::write::DeflateDecoder;
 
+use crate::MAX_MESSAGE_SIZE;
+
 /// `Event`s are produced by [`WebSocketClient::recv`](crate::WebSocketClient::recv)
 /// and [`WebSocketClient::recv_timeout`](crate::WebSocketClient::recv_timeout)
 #[derive(Debug)]
@@ -17,7 +19,7 @@ pub enum Event {
     Closed,
     /// An error sending a message, generally indicating the connection closed.
     /// Returns the bytes that failed to send.
-    Error(Vec<u8>),
+    Error(Bytes),
 }
 
 impl Event {
@@ -44,9 +46,9 @@ pub(crate) enum MessageError {
 }
 
 impl PartialMessage {
-    pub(crate) fn text() -> Self { Self::Text(BytesMut::new()) }
+    pub(crate) fn text() -> Self { Self::Text(BytesMut::with_capacity(MAX_MESSAGE_SIZE)) }
 
-    pub(crate) fn binary() -> Self { Self::Binary(BytesMut::new()) }
+    pub(crate) fn binary() -> Self { Self::Binary(BytesMut::with_capacity(MAX_MESSAGE_SIZE)) }
 
     pub(crate) fn push_bytes(&mut self, bytes: &[u8]) {
         match self {

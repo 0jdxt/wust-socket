@@ -55,7 +55,7 @@ impl MessageHandler for EchoHandler {
         println!("------ client closed");
     }
 
-    async fn on_error(&self, e: Vec<u8>) {
+    async fn on_error(&self, e: Bytes) {
         eprintln!("client error {e:?}");
     }
 

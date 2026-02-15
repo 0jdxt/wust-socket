@@ -4,6 +4,7 @@ use std::{
     time::Duration,
 };
 
+use bytes::Bytes;
 use clap::Parser;
 use tokio::sync::mpsc::error::SendError;
 use tracing_subscriber::EnvFilter;
@@ -28,7 +29,7 @@ impl Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), SendError<Vec<u8>>> {
+async fn main() -> Result<(), SendError<Bytes>> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env().add_directive("wust_socket=info".parse().unwrap()),
@@ -51,7 +52,7 @@ async fn main() -> Result<(), SendError<Vec<u8>>> {
     let mut f = File::open("lena512.bmp").unwrap();
     f.read_to_end(&mut data).unwrap();
     for chunk in data.chunks(32 << 10) {
-        ws.send_bytes(chunk).await?
+        ws.send_bytes(chunk).await?;
     }
 
     let mut f = File::create("out.bmp").unwrap();

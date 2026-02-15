@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use flate2::{
     Compression,
     write::{DeflateDecoder, DeflateEncoder},
@@ -35,9 +35,9 @@ use crate::{
 /// Generic WebSocket connection that applies masking according to role R, either client or server.
 pub struct WebSocket<R: RolePolicy> {
     pub(crate) inner: Arc<Inner>,
-    pub(crate) close_tx: Sender<Vec<u8>>,
-    pub(crate) ctrl_tx: Sender<Vec<u8>>,
-    pub(crate) data_tx: Sender<Vec<u8>>,
+    pub(crate) close_tx: Sender<Bytes>,
+    pub(crate) ctrl_tx: Sender<Bytes>,
+    pub(crate) data_tx: Sender<Bytes>,
     pub(crate) event_rx: Receiver<Event>,
     pub(crate) local_addr: SocketAddr,
     pub(crate) peer_addr: SocketAddr,
@@ -69,25 +69,25 @@ pub trait MessageHandler: Send + Sync + 'static {
     async fn on_text(&self, s: Bytes) -> Option<Message>;
     async fn on_binary(&self, b: Bytes) -> Option<Message>;
     async fn on_close(&self);
-    async fn on_error(&self, e: Vec<u8>);
+    async fn on_error(&self, e: Bytes);
     async fn on_pong(&self, latency: u16);
 }
 
 #[derive(Clone)]
 pub(crate) struct WsSender {
-    ctrl: Sender<Vec<u8>>,
-    close: Sender<Vec<u8>>,
+    ctrl: Sender<Bytes>,
+    close: Sender<Bytes>,
     event: Sender<Event>,
 }
 
 impl WsSender {
-    pub fn new(ctrl: Sender<Vec<u8>>, close: Sender<Vec<u8>>, event: Sender<Event>) -> Self {
+    pub fn new(ctrl: Sender<Bytes>, close: Sender<Bytes>, event: Sender<Event>) -> Self {
         Self { ctrl, close, event }
     }
 
-    pub async fn ctrl(&self, data: Vec<u8>) -> Result<Vec<u8>> { self.ctrl.send(data).await }
+    pub async fn ctrl(&self, data: Bytes) -> Result<Bytes> { self.ctrl.send(data).await }
 
-    pub async fn close(&self, data: Vec<u8>) -> Result<Vec<u8>> { self.close.send(data).await }
+    pub async fn close(&self, data: Bytes) -> Result<Bytes> { self.close.send(data).await }
 
     pub async fn event(&self, event: Event) -> Result<Event> { self.event.send(event).await }
 }
@@ -162,18 +162,18 @@ impl<R: RolePolicy> WebSocket<R> {
     /// # Errors
     /// If the peer has disconnected or we are currently closing, this function returns an error.
     /// The error includes the value passed.
-    pub async fn send_text(&mut self, text: &str) -> Result<Vec<u8>> {
+    pub async fn send_text(&mut self, text: &str) -> Result<Bytes> {
         self.send_data(text.as_bytes(), Opcode::Text).await
     }
 
     /// Sends bytes to the connected endpoint.
     /// # Errors
     /// If the peer has disconnected or we are currently closing, this function returns an error.
-    pub async fn send_bytes(&mut self, bytes: &[u8]) -> Result<Vec<u8>> {
+    pub async fn send_bytes(&mut self, bytes: &[u8]) -> Result<Bytes> {
         self.send_data(bytes, Opcode::Bin).await
     }
 
-    async fn send_data(&mut self, bytes: &[u8], opcode: Opcode) -> Result<Vec<u8>> {
+    async fn send_data(&mut self, bytes: &[u8], opcode: Opcode) -> Result<Bytes> {
         let f = DataFrame::<R>::new(bytes, opcode);
         let chunks = f.encode(&mut self.deflater, self.use_context);
         for chunk in chunks {
@@ -198,7 +198,7 @@ impl<R: RolePolicy> WebSocket<R> {
     /// as an [`Event::Pong`].
     /// # Errors
     /// If the peer has disconnected or we are currently closing, this function returns an error.
-    pub async fn ping(&self) -> Result<Vec<u8>> {
+    pub async fn ping(&self) -> Result<Bytes> {
         let nonce = self.inner.ping_stats.lock().await.new_nonce();
         let f = ControlFrame::<R>::ping(&nonce);
         self.ctrl_tx.send(f.encode()).await
@@ -294,9 +294,9 @@ impl<R: RolePolicy> WebSocket<R> {
     }
 
     pub(crate) fn writer_loop<S: AsyncWrite + Send + 'static>(
-        mut close_rx: Receiver<Vec<u8>>,
-        mut ctrl_rx: Receiver<Vec<u8>>,
-        mut data_rx: Receiver<Vec<u8>>,
+        mut close_rx: Receiver<Bytes>,
+        mut ctrl_rx: Receiver<Bytes>,
+        mut data_rx: Receiver<Bytes>,
         mut writer: WriteHalf<S>,
     ) {
         tokio::spawn(async move {
@@ -384,15 +384,14 @@ impl<R: RolePolicy> WebSocket<R> {
         let inner = self.inner.clone();
         let use_context = self.use_context;
 
-        // TODO: alloc we currently allocate for every client/connection
         tokio::spawn(async move {
-            let mut buf = vec![0; MAX_FRAME_PAYLOAD];
+            let mut buf = BytesMut::with_capacity(MAX_FRAME_PAYLOAD);
             let mut partial_msg = None;
 
             let mut fd = FrameDecoder::<R>::new(inflater.is_some());
             loop {
                 let n = {
-                    match reader.read(&mut buf).await {
+                    match reader.read_buf(&mut buf).await {
                         Ok(0) => {
                             tracing::trace!("TCP FIN");
                             break;
@@ -407,7 +406,7 @@ impl<R: RolePolicy> WebSocket<R> {
                 tracing::trace!(bytes = n, "read socket");
                 *inner.last_seen.lock().await = Instant::now();
 
-                fd.push_bytes(&buf[..n]);
+                fd.push_bytes(&buf.split_to(n));
                 loop {
                     match fd.next_frame() {
                         Ok(Some(FrameState::Complete(frame))) => {
@@ -422,9 +421,7 @@ impl<R: RolePolicy> WebSocket<R> {
                             .await
                             .is_none()
                             {
-                                // finished processing frames for now
-                                // if the connection is closing, just read and discard until FIN
-                                inner.closing.store(true, Ordering::Release);
+                                // connection closed, nothing to process anymore
                                 break;
                             }
                         }

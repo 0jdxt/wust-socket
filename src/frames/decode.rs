@@ -148,7 +148,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
             is_fin: b & 0b1000_0000 > 0,
             compressed,
             opcode: Opcode::try_from(b & 0b1111).map_err(|()| {
-                tracing::trace!("invalid opcode");
+                tracing::warn!("invalid opcode");
                 FrameParseError::ProtoError
             })?,
 
@@ -170,7 +170,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
         let masked = (b & 0b1000_0000) > 0;
         // Servers must NOT mask message
         if P::SERVER != masked {
-            tracing::trace!("message mask violates policy");
+            tracing::warn!("message mask violates policy");
             return Err(FrameParseError::ProtoError);
         }
 
@@ -181,7 +181,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
             // must be FIN, not compressed and max 125B payload
             && (!self.ctx.is_fin || self.ctx.compressed || self.ctx.payload_len > 125)
         {
-            tracing::trace!("invalid control frame received");
+            tracing::warn!("invalid control frame received");
             return Err(FrameParseError::ProtoError);
         }
 
@@ -207,7 +207,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
                 return Ok(None);
             };
             usize::try_from(u64::from_be_bytes(len_bytes)).map_err(|_| {
-                tracing::trace!("frame exceeded maximum size");
+                tracing::warn!("frame exceeded maximum size");
                 FrameParseError::SizeErr
             })?
         };
