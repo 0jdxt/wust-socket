@@ -52,7 +52,7 @@ async fn handle_ping<R: RolePolicy>(frame: &DecodedFrame, sender: &WsSender) {
 // else its unsolicited and we ignore
 async fn handle_pong<R: RolePolicy>(frame: &DecodedFrame, sender: &WsSender, inner: &Arc<Inner>) {
     tracing::debug!("received PONG");
-    if let Ok(bytes) = frame.payload.as_slice().try_into() {
+    if let Ok(bytes) = (*frame.payload).try_into() {
         match inner.ping_stats.lock().await.on_pong(bytes) {
             Ok(latency) => {
                 let _ = sender.event(Event::Pong(latency)).await;

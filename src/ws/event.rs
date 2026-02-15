@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use bytes::{Bytes, BytesMut};
 use flate2::write::DeflateDecoder;
 
 /// `Event`s are produced by [`WebSocketClient::recv`](crate::WebSocketClient::recv)
@@ -9,9 +10,9 @@ pub enum Event {
     /// Pong event with its latency in milliseconds.
     Pong(u16),
     /// Valid UTF-8 message.
-    Text(String),
+    Text(Bytes),
     /// Binary message bytes.
-    Binary(Vec<u8>),
+    Binary(Bytes),
     /// The connection to the websocket has been closed.
     Closed,
     /// An error sending a message, generally indicating the connection closed.
@@ -32,8 +33,8 @@ impl Event {
 
 #[derive(Debug)]
 pub(crate) enum PartialMessage {
-    Text(Vec<u8>),
-    Binary(Vec<u8>),
+    Text(BytesMut),
+    Binary(BytesMut),
 }
 
 #[derive(Debug)]
@@ -43,13 +44,13 @@ pub(crate) enum MessageError {
 }
 
 impl PartialMessage {
-    pub(crate) fn text() -> Self { Self::Text(vec![]) }
+    pub(crate) fn text() -> Self { Self::Text(BytesMut::new()) }
 
-    pub(crate) fn binary() -> Self { Self::Binary(vec![]) }
+    pub(crate) fn binary() -> Self { Self::Binary(BytesMut::new()) }
 
     pub(crate) fn push_bytes(&mut self, bytes: &[u8]) {
         match self {
-            Self::Text(v) | Self::Binary(v) => v.extend(bytes),
+            Self::Text(v) | Self::Binary(v) => v.extend_from_slice(bytes),
         }
     }
 
@@ -80,18 +81,20 @@ impl PartialMessage {
                 0
             };
 
-            if inflater.write_all(&data).is_err() {
+            if inflater.write_all(&data).is_err() || inflater.flush().is_err() {
                 return Err(MessageError::Deflate);
             }
-            let _ = inflater.flush();
-            data = inflater.get_ref()[end..].to_vec();
+            data.clear();
+            data.extend_from_slice(&inflater.get_ref()[end..]);
             tracing::trace!("inflated {init_size} => {}", data.len());
         }
+        let data = data.freeze();
 
         if text {
-            String::from_utf8(data)
-                .map(Event::Text)
-                .map_err(|_| MessageError::Utf8)
+            if str::from_utf8(&data).is_err() {
+                return Err(MessageError::Utf8);
+            }
+            Ok(Event::Text(data))
         } else {
             Ok(Event::Binary(data))
         }

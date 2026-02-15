@@ -3,7 +3,7 @@ use std::{io::Write, marker::PhantomData};
 use flate2::write::DeflateEncoder;
 
 use super::Opcode;
-use crate::{MAX_FRAME_PAYLOAD, MAX_MESSAGE_SIZE, role::RolePolicy};
+use crate::{role::RolePolicy, MAX_FRAME_PAYLOAD, MAX_MESSAGE_SIZE};
 
 // DataFrames may be fragmented or very large hence they need extra processing compared to ControlFrames
 #[derive(Debug)]
@@ -73,7 +73,7 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
         last: bool,
         compressed: bool,
     ) -> Vec<u8> {
-        tracing::info!(
+        tracing::trace!(
             opcode = ?self.opcode,
             len = chunk.len(),
             first = first,
@@ -135,7 +135,7 @@ impl<'a, P: RolePolicy> DataFrame<'a, P> {
 mod bench {
     extern crate test;
     use paste::paste;
-    use test::{Bencher, black_box};
+    use test::{black_box, Bencher};
 
     use super::*;
     use crate::role::*;

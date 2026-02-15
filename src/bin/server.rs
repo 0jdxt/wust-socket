@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use wust_socket::{Message, MessageHandler, UpgradeError, WebSocketServer};
@@ -36,13 +37,15 @@ async fn main() -> Result<(), UpgradeError> {
 struct EchoHandler;
 #[async_trait::async_trait]
 impl MessageHandler for EchoHandler {
-    async fn on_text(&self, s: String) -> Option<Message> {
+    async fn on_text(&self, b: Bytes) -> Option<Message> {
+        let s = unsafe { str::from_utf8_unchecked(&b) };
+
         let l = s.ceil_char_boundary(20);
         println!("got message T {} {:?}", s.len(), &s[..l]);
-        Some(Message::Text(s))
+        Some(Message::Text(b))
     }
 
-    async fn on_binary(&self, b: Vec<u8>) -> Option<Message> {
+    async fn on_binary(&self, b: Bytes) -> Option<Message> {
         let l = b.len().min(10);
         println!("got messsage B {} {:?}", b.len(), &b[..l]);
         Some(Message::Binary(b))

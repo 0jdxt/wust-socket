@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bytes::Bytes;
 use flate2::{
     Compression,
     write::{DeflateDecoder, DeflateEncoder},
@@ -54,14 +55,19 @@ pub(crate) struct Inner {
 
 /// Message to be sent over the websocket.
 pub enum Message {
-    Text(String),
-    Binary(Vec<u8>),
+    Text(Bytes),
+    Binary(Bytes),
+}
+
+impl Message {
+    #[must_use]
+    pub fn text(s: &str) -> Self { Self::Text(Bytes::from(s.to_string())) }
 }
 
 #[async_trait::async_trait]
 pub trait MessageHandler: Send + Sync + 'static {
-    async fn on_text(&self, s: String) -> Option<Message>;
-    async fn on_binary(&self, b: Vec<u8>) -> Option<Message>;
+    async fn on_text(&self, s: Bytes) -> Option<Message>;
+    async fn on_binary(&self, b: Bytes) -> Option<Message>;
     async fn on_close(&self);
     async fn on_error(&self, e: Vec<u8>);
     async fn on_pong(&self, latency: u16);
@@ -244,7 +250,7 @@ impl<R: RolePolicy> WebSocket<R> {
     async fn handle_ws_message(&mut self, msg: Option<Message>) {
         match msg {
             Some(Message::Text(s)) => {
-                if let Err(e) = self.send_text(&s).await {
+                if let Err(e) = self.send_data(&s, Opcode::Text).await {
                     tracing::error!(e = ?e, "failed to send text message");
                 }
             }

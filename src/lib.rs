@@ -20,11 +20,9 @@ pub use ws::{Event, Message, MessageHandler, WebSocket};
 
 // If using autobahn, set frames to 16M for testing
 // otherwise our real max is 16K frames
-const AUTOBAHN: bool = true;
-pub(crate) const MAX_FRAME_PAYLOAD: usize = if AUTOBAHN {
-    16 * 1024 * 1024 // 16M
-} else {
-    16 * 1024 // 16K
-};
+#[cfg(feature = "autobahn")]
+pub(crate) const MAX_FRAME_PAYLOAD: usize = 16 * 1024 * 1024; // 16M
+#[cfg(not(feature = "autobahn"))]
+pub(crate) const MAX_FRAME_PAYLOAD: usize = 16 * 1024; // 16K
 
 pub(crate) const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16MB

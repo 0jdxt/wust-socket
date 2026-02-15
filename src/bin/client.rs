@@ -62,7 +62,8 @@ async fn main() -> Result<(), SendError<Vec<u8>>> {
                 break;
             }
             Event::Pong(n) => println!("PONG: {n}ms"),
-            Event::Text(s) => {
+            Event::Text(b) => {
+                let s = unsafe { str::from_utf8_unchecked(&b) };
                 let l = s.ceil_char_boundary(200);
                 println!("got message T {} {:?}", s.len(), &s[..l]);
             }

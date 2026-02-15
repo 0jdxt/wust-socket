@@ -1,7 +1,9 @@
-use std::{array, collections::VecDeque, marker::PhantomData};
+use std::{marker::PhantomData, ops::Deref};
+
+use bytes::{Bytes, BytesMut};
 
 use super::Opcode;
-use crate::{MAX_FRAME_PAYLOAD, role::RolePolicy};
+use crate::{role::RolePolicy, MAX_FRAME_PAYLOAD};
 
 // helper type since decoder errors return FrameParseResult
 type Result<T> = std::result::Result<T, FrameParseError>;
@@ -9,7 +11,7 @@ type Result<T> = std::result::Result<T, FrameParseError>;
 #[derive(Debug)]
 pub(crate) struct DecodedFrame {
     pub(crate) opcode: Opcode,
-    pub(crate) payload: Vec<u8>,
+    pub(crate) payload: Bytes,
     pub(crate) is_fin: bool,
     pub(crate) compressed: bool,
 }
@@ -27,7 +29,7 @@ pub(crate) enum FrameParseError {
 }
 
 pub(crate) struct FrameDecoder<P: RolePolicy> {
-    buf: VecDeque<u8>,
+    buf: BytesMut,
     state: DecodeState,
     ctx: DecodeContext,
     compressed: bool,
@@ -55,7 +57,7 @@ struct DecodeContext {
 impl<P: RolePolicy> FrameDecoder<P> {
     pub(crate) fn new(compressed: bool) -> Self {
         Self {
-            buf: VecDeque::new(),
+            buf: BytesMut::with_capacity(MAX_FRAME_PAYLOAD),
             state: DecodeState::Header1,
             ctx: DecodeContext {
                 is_fin: false,
@@ -69,7 +71,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
         }
     }
 
-    pub(crate) fn push_bytes(&mut self, bytes: &[u8]) { self.buf.extend(bytes); }
+    pub(crate) fn push_bytes(&mut self, bytes: &[u8]) { self.buf.extend_from_slice(bytes); }
 
     pub(crate) fn next_frame(&mut self) -> Result<Option<FrameState>> {
         tracing::trace!(
@@ -80,9 +82,10 @@ impl<P: RolePolicy> FrameDecoder<P> {
         loop {
             let next_state = match self.state {
                 DecodeState::Header1 => {
-                    let Some(b) = self.buf.pop_front() else {
+                    if self.buf.is_empty() {
                         return Ok(None);
-                    };
+                    }
+                    let b = self.buf.split_to(1)[0];
                     self.parse_header1(b)?
                 }
                 DecodeState::Header2 => match self.parse_header2()? {
@@ -116,7 +119,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
                     );
                     return Ok(Some(FrameState::Complete(DecodedFrame {
                         opcode: self.ctx.opcode,
-                        payload,
+                        payload: payload.freeze(),
                         is_fin: self.ctx.is_fin,
                         compressed: self.ctx.compressed,
                     })));
@@ -159,10 +162,11 @@ impl<P: RolePolicy> FrameDecoder<P> {
     fn parse_header2(&mut self) -> Result<Option<DecodeState>> {
         // 0    | 1 2 3 4 5 6 7
         // Mask | Payload len
-        let Some(b) = self.buf.pop_front() else {
+        if self.buf.is_empty() {
             return Ok(None);
-        };
+        }
 
+        let b = self.buf.split_to(1)[0];
         let masked = (b & 0b1000_0000) > 0;
         // Servers must NOT mask message
         if P::SERVER != masked {
@@ -215,7 +219,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
         }))
     }
 
-    fn parse_payload(&mut self) -> Result<Option<Vec<u8>>> {
+    fn parse_payload(&mut self) -> Result<Option<BytesMut>> {
         if self.buf.len() < self.ctx.payload_len {
             return Ok(None);
         }
@@ -227,7 +231,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
             return Err(FrameParseError::SizeErr);
         }
 
-        let mut payload: Vec<u8> = self.buf.drain(..self.ctx.payload_len).collect();
+        let mut payload = self.buf.split_to(self.ctx.payload_len);
 
         if P::SERVER {
             crate::protocol::mask(&mut payload, self.ctx.mask_key);
@@ -244,7 +248,7 @@ impl<P: RolePolicy> FrameDecoder<P> {
         if N > self.buf.len() {
             return None;
         }
-        Some(array::from_fn(|_| self.buf.pop_front().unwrap()))
+        self.buf.split_to(N).deref().try_into().ok()
     }
 }
 
@@ -262,7 +266,7 @@ fn is_valid_close_payload(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use proptest::{
-        collection::{VecStrategy, vec},
+        collection::{vec, VecStrategy},
         num,
         prelude::*,
         strategy::ValueTree,
@@ -387,7 +391,7 @@ mod bench {
     #![allow(clippy::cast_possible_truncation)]
     extern crate test;
 
-    use test::{Bencher, black_box};
+    use test::{black_box, Bencher};
 
     use super::*;
     use crate::role::{Client, RolePolicy, Server};
