@@ -6,7 +6,7 @@ use super::{Inner, PartialMessage};
 use crate::{
     Event, MAX_MESSAGE_SIZE,
     error::CloseReason,
-    frames::{ControlFrame, DecodedFrame, Opcode},
+    frames::{DecodedFrame, Opcode, control},
     protocol::PongError,
     role::RolePolicy,
     ws::{event::MessageError, websocket::WsSender},
@@ -43,7 +43,7 @@ pub(super) async fn handle_frame<R: RolePolicy>(
 // Reply with pong
 async fn handle_ping<R: RolePolicy>(frame: &DecodedFrame, sender: &WsSender) {
     tracing::info!("received PING, scheduling PONG");
-    let bytes = ControlFrame::<R>::pong(&frame.payload).encode();
+    let bytes = control::pong::<R>(&frame.payload);
     let _ = sender.ctrl(bytes).await;
 }
 
@@ -60,10 +60,7 @@ async fn handle_pong<R: RolePolicy>(frame: &DecodedFrame, sender: &WsSender, inn
             Err(PongError::Late(latency)) => {
                 tracing::warn!(latency = latency, "late pong");
                 let _ = sender
-                    .close(ControlFrame::<R>::close_reason(
-                        CloseReason::Policy,
-                        "ping timeout",
-                    ))
+                    .close(control::close::<R>(CloseReason::Policy, "ping timeout"))
                     .await;
             }
             Err(PongError::Nonce(expected)) => {
@@ -80,11 +77,23 @@ async fn handle_pong<R: RolePolicy>(frame: &DecodedFrame, sender: &WsSender, inn
 // If closing, shutdown; otherwise, reply with close frame
 async fn handle_close<R: RolePolicy>(frame: &DecodedFrame, inner: &Arc<Inner>, sender: &WsSender) {
     // Here we parse the close reason in order to give the appropriate response.
-    // If empty, treat as normal.
+    // If empty, treat as normal. otherwise we validate close payload
     let code = if frame.payload.is_empty() {
+        tracing::info!("recieved empty Close frame");
         CloseReason::Normal
     } else {
-        CloseReason::from([frame.payload[0], frame.payload[1]])
+        let Ok(text) = str::from_utf8(&frame.payload[2..]) else {
+            let _ = sender
+                .close(control::close::<R>(
+                    CloseReason::ProtoError,
+                    "invalid close message",
+                ))
+                .await;
+            return;
+        };
+        let code = CloseReason::from([frame.payload[0], frame.payload[1]]);
+        tracing::info!(reason=?code, text=text, "recieved Close frame");
+        code
     };
 
     let reason = match code {
@@ -96,20 +105,15 @@ async fn handle_close<R: RolePolicy>(frame: &DecodedFrame, inner: &Arc<Inner>, s
         _ => CloseReason::Normal,
     };
 
-    let Ok(text) = str::from_utf8(&frame.payload[2..]) else {
-        let f = ControlFrame::<R>::close_reason(CloseReason::ProtoError, "!invalid close message");
-        let _ = sender.close(f).await;
-        return;
-    };
-    tracing::info!(reason=?code, text=text, "recieved Close frame");
-
     // if not already closing try to send close frame, log err
     if !inner.closing.swap(true, Ordering::AcqRel) {
         tracing::trace!(reason=?reason, "sending Close frame");
-        let f = ControlFrame::<R>::close_reason(reason, "peer closed");
-        if let Err(e) = sender.close(f).await {
-            tracing::warn!("error sending close");
-            let _ = sender.event(Event::Error(e.0)).await;
+        if sender
+            .close(control::close::<R>(reason, "peer closed"))
+            .await
+            .is_err()
+        {
+            tracing::trace!("close_rx dropped");
         }
     }
 }
@@ -140,7 +144,7 @@ async fn handle_data<R: RolePolicy>(
             // or we get TEXT/BINARY without finishing the last message
             // close the connection
             let _ = sender
-                .close(ControlFrame::<R>::close_reason(
+                .close(control::close::<R>(
                     CloseReason::ProtoError,
                     "Unexpected frame",
                 ))
@@ -151,7 +155,7 @@ async fn handle_data<R: RolePolicy>(
 
     if partial.len() + frame.payload.len() > MAX_MESSAGE_SIZE {
         let _ = sender
-            .close(ControlFrame::<R>::close_reason(
+            .close(control::close::<R>(
                 CloseReason::TooBig,
                 "Message exceeded maximum size",
             ))
@@ -182,16 +186,13 @@ async fn handle_data<R: RolePolicy>(
             }
             Err(MessageError::Utf8) => {
                 let _ = sender
-                    .close(ControlFrame::<R>::close_reason(
-                        CloseReason::DataError,
-                        "Invalid UTF-8",
-                    ))
+                    .close(control::close::<R>(CloseReason::DataError, "Invalid UTF-8"))
                     .await;
                 return None;
             }
             Err(MessageError::Deflate) => {
                 let _ = sender
-                    .close(ControlFrame::<R>::close_reason(
+                    .close(control::close::<R>(
                         CloseReason::ProtoError,
                         "bad deflate stream",
                     ))

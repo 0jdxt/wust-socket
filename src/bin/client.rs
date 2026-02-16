@@ -44,6 +44,8 @@ async fn main() -> Result<(), SendError<Bytes>> {
         .await
         .expect("connect");
 
+    ws.ping().await.unwrap();
+
     ws.send_text(LOREM).await?;
     ws.send_text(LOREM).await?;
 
@@ -73,8 +75,6 @@ async fn main() -> Result<(), SendError<Bytes>> {
                 f.write_all(&b).unwrap();
                 println!("got messsage B {} {:?}", b.len(), &b[..l]);
             }
-
-            Event::Error(e) => println!("ERR: {e:?}"),
         }
     }
     ws.close().await;

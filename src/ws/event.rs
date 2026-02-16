@@ -17,9 +17,6 @@ pub enum Event {
     Binary(Bytes),
     /// The connection to the websocket has been closed.
     Closed,
-    /// An error sending a message, generally indicating the connection closed.
-    /// Returns the bytes that failed to send.
-    Error(Bytes),
 }
 
 impl Event {
@@ -27,7 +24,6 @@ impl Event {
         match self {
             Self::Text(s) => s.len(),
             Self::Binary(b) => b.len(),
-            Self::Error(e) => e.len(),
             _ => 0,
         }
     }

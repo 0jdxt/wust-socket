@@ -55,8 +55,8 @@ impl MessageHandler for EchoHandler {
         println!("------ client closed");
     }
 
-    async fn on_error(&self, e: Bytes) {
-        eprintln!("client error {e:?}");
+    async fn on_error(&self) {
+        eprintln!("client error");
     }
 
     async fn on_pong(&self, latency: u16) {

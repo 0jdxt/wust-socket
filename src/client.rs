@@ -93,6 +93,7 @@ impl WebSocketClient {
         use_context: bool,
     ) -> Result<Self> {
         let fut = Self::connect(input, compressed, use_context);
+        // TODO: distinguish between connection and timeout
         match tokio::time::timeout(timeout, fut).await {
             Ok(Ok(s)) => Ok(s),
             _ => Err(UpgradeError::Timeout),
@@ -102,8 +103,8 @@ impl WebSocketClient {
     async fn try_upgrade<S>(
         mut stream: S,
         ctx: ClientContext<'_>,
-        compressed: bool,
-        use_context: bool,
+        req_compressed: bool,
+        req_use_context: bool,
     ) -> Result<Self>
     where
         S: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static,
@@ -119,9 +120,9 @@ impl WebSocketClient {
             Sec-WebSocket-Version: 13\r\n",
             ctx.path, ctx.host, ctx.port
         );
-        if compressed {
+        if req_compressed {
             req.push_str("Sec-WebSocket-Extensions: permessage-deflate");
-            if !use_context {
+            if !req_use_context {
                 req.push_str("; client_no_context_takeover");
                 req.push_str("; server_no_context_takeover");
             }

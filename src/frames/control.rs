@@ -1,83 +1,54 @@
-use std::marker::PhantomData;
-
-use bytes::{BufMut, Bytes, BytesMut};
-
 use super::Opcode;
 use crate::{error::CloseReason, role::RolePolicy};
 
-// Separate ControlFrame struct to allow a fast path for sending single frames (Ping, Pong, Close) which will have a payload <= 125 bytes and FIN always set.
-pub(crate) struct ControlFrame<'a, R: RolePolicy> {
-    opcode: Opcode,
-    payload: &'a [u8],
-    _p: PhantomData<R>,
+// Separate control frames to allow a fast path for sending single frames (Ping, Pong, Close) which will have a payload <= 125 bytes and FIN always set.
+
+// Functions to produce each kind of control frame with given payload
+pub(crate) fn ping<R: RolePolicy>(payload: &[u8]) -> Vec<u8> { encode::<R>(Opcode::Ping, payload) }
+
+pub(crate) fn pong<R: RolePolicy>(payload: &[u8]) -> Vec<u8> { encode::<R>(Opcode::Pong, payload) }
+
+pub(crate) fn close<R: RolePolicy>(reason: CloseReason, text: &'static str) -> Vec<u8> {
+    let mut payload = [0; 125];
+
+    // push code bytes
+    let code: [u8; 2] = reason.into();
+    payload[..2].copy_from_slice(&code);
+
+    // limit text length to 123
+    let len = text.floor_char_boundary(123);
+    let bytes = &text.as_bytes()[..len];
+    payload[2..2 + len].copy_from_slice(bytes);
+    encode::<R>(Opcode::Close, &payload[..2 + len])
 }
 
-// Functions to produce each kind of ControlFrame with payload,
-// and a send function to write to stream
-impl<'a, R: RolePolicy> ControlFrame<'a, R> {
-    pub(crate) fn ping(payload: &'a [u8]) -> Self {
-        Self {
-            opcode: Opcode::Ping,
-            payload,
-            _p: PhantomData,
-        }
-    }
+// encoding: sets Opcode, FIN, MASK and optionally masks payload
+#[allow(clippy::cast_possible_truncation)]
+fn encode<R: RolePolicy>(opcode: Opcode, payload: &[u8]) -> Vec<u8> {
+    tracing::trace!(
+        opcode = ?opcode,
+        len = payload.len(),
+        "encoding CTRL"
+    );
 
-    pub(crate) fn pong(payload: &'a [u8]) -> Self {
-        Self {
-            opcode: Opcode::Pong,
-            payload,
-            _p: PhantomData,
-        }
-    }
+    let mut buf = [0; 131]; // max single frame size
+    buf[0] = opcode as u8 | 0x80; // always set FIN
+    buf[1] = payload.len() as u8;
 
-    pub(crate) fn close(payload: &'a [u8]) -> Self {
-        Self {
-            opcode: Opcode::Close,
-            payload,
-            _p: PhantomData,
-        }
-    }
-
-    pub(crate) fn close_reason(reason: CloseReason, text: &'static str) -> Bytes {
-        // limit text length to 123
-        let len = text.floor_char_boundary(123);
-        let bytes = &text.as_bytes()[..len];
-
-        let mut buf = BytesMut::with_capacity(2 + bytes.len());
-        buf.extend_from_slice(&Into::<[u8; 2]>::into(reason));
-        buf.extend_from_slice(bytes);
-        ControlFrame::<R>::close(&buf).encode()
-    }
-
-    // encoding: sets Opcode, FIN, MASK and optionally masks payload
-    pub(crate) fn encode(self) -> Bytes {
-        tracing::trace!(
-            opcode = ?self.opcode,
-            len = self.payload.len(),
-            "encoding CTRL"
-        );
-
-        let mut buf = BytesMut::with_capacity(self.payload.len() + 6); // max single frame size
-        buf.put_u8(self.opcode as u8 | 0x80); // always set FIN
-        #[allow(clippy::cast_possible_truncation)]
-        buf.put_u8(self.payload.len() as u8);
-
-        // Clients must SEND masked
-        if R::CLIENT {
-            buf[1] |= 0x80;
-            let mut mask_key = [0; 4];
-            rand::fill(&mut mask_key);
-            buf.extend_from_slice(&mask_key);
-
-            let start = buf.len();
-            buf.extend_from_slice(self.payload);
-            crate::protocol::mask(&mut buf[start..], mask_key);
-        } else {
-            buf.extend_from_slice(self.payload);
-        }
-
-        buf.freeze()
+    // Clients must SEND masked
+    if R::CLIENT {
+        buf[1] |= 0x80;
+        let mask_key: [u8; 4] = rand::random();
+        buf[2..6].copy_from_slice(&mask_key);
+        let end = 6 + payload.len();
+        let p = &mut buf[6..end];
+        p.copy_from_slice(payload);
+        crate::protocol::mask(p, mask_key);
+        buf[..end].to_vec()
+    } else {
+        let end = 2 + payload.len();
+        buf[2..end].copy_from_slice(payload);
+        buf[..end].to_vec()
     }
 }
 
@@ -96,9 +67,8 @@ mod bench {
     fn bench_control_frame<P: RolePolicy>(b: &mut Bencher, payload_len: usize) {
         let payload = make_payload(payload_len);
         b.iter(|| {
-            let frame = ControlFrame::<P>::ping(&payload);
-            let chunks = black_box(frame.encode());
-            black_box(chunks.len()); // consume so compiler can't optimize away
+            let frame = black_box(ping::<P>(&payload));
+            black_box(frame.len()); // consume so compiler can't optimize away
         });
     }
 

@@ -27,7 +27,7 @@ use super::frame_handler::handle_frame;
 use crate::{
     Event, MAX_FRAME_PAYLOAD, UpgradeError,
     error::CloseReason,
-    frames::{ControlFrame, DataFrame, FrameDecoder, FrameParseError, FrameState, Opcode},
+    frames::{FrameDecoder, FrameParseError, FrameState, Opcode, control, data},
     protocol::PingStats,
     role::RolePolicy,
 };
@@ -35,8 +35,8 @@ use crate::{
 /// Generic WebSocket connection that applies masking according to role R, either client or server.
 pub struct WebSocket<R: RolePolicy> {
     pub(crate) inner: Arc<Inner>,
-    pub(crate) close_tx: Sender<Bytes>,
-    pub(crate) ctrl_tx: Sender<Bytes>,
+    pub(crate) close_tx: Sender<Vec<u8>>,
+    pub(crate) ctrl_tx: Sender<Vec<u8>>,
     pub(crate) data_tx: Sender<Bytes>,
     pub(crate) event_rx: Receiver<Event>,
     pub(crate) local_addr: SocketAddr,
@@ -69,25 +69,25 @@ pub trait MessageHandler: Send + Sync + 'static {
     async fn on_text(&self, s: Bytes) -> Option<Message>;
     async fn on_binary(&self, b: Bytes) -> Option<Message>;
     async fn on_close(&self);
-    async fn on_error(&self, e: Bytes);
+    async fn on_error(&self);
     async fn on_pong(&self, latency: u16);
 }
 
 #[derive(Clone)]
 pub(crate) struct WsSender {
-    ctrl: Sender<Bytes>,
-    close: Sender<Bytes>,
+    ctrl: Sender<Vec<u8>>,
+    close: Sender<Vec<u8>>,
     event: Sender<Event>,
 }
 
 impl WsSender {
-    pub fn new(ctrl: Sender<Bytes>, close: Sender<Bytes>, event: Sender<Event>) -> Self {
+    pub fn new(ctrl: Sender<Vec<u8>>, close: Sender<Vec<u8>>, event: Sender<Event>) -> Self {
         Self { ctrl, close, event }
     }
 
-    pub async fn ctrl(&self, data: Bytes) -> Result<Bytes> { self.ctrl.send(data).await }
+    pub async fn ctrl(&self, data: Vec<u8>) -> Result<Vec<u8>> { self.ctrl.send(data).await }
 
-    pub async fn close(&self, data: Bytes) -> Result<Bytes> { self.close.send(data).await }
+    pub async fn close(&self, data: Vec<u8>) -> Result<Vec<u8>> { self.close.send(data).await }
 
     pub async fn event(&self, event: Event) -> Result<Event> { self.event.send(event).await }
 }
@@ -174,12 +174,14 @@ impl<R: RolePolicy> WebSocket<R> {
     }
 
     async fn send_data(&mut self, bytes: &[u8], opcode: Opcode) -> Result<Bytes> {
-        let f = DataFrame::<R>::new(bytes, opcode);
-        let chunks = f.encode(&mut self.deflater, self.use_context);
-        for chunk in chunks {
-            self.data_tx.send(chunk).await?;
-        }
-        Ok(())
+        self.data_tx
+            .send(data::<R>(
+                bytes,
+                opcode,
+                &mut self.deflater,
+                self.use_context,
+            ))
+            .await
     }
 
     /// Request close from peer and close the connection.
@@ -187,10 +189,7 @@ impl<R: RolePolicy> WebSocket<R> {
 
     async fn close_reason(&mut self, reason: CloseReason, text: &'static str) {
         if !self.inner.closing.swap(true, Ordering::AcqRel) {
-            let _ = self
-                .close_tx
-                .send(ControlFrame::<R>::close_reason(reason, text))
-                .await;
+            let _ = self.close_tx.send(control::close::<R>(reason, text)).await;
         }
     }
 
@@ -198,10 +197,9 @@ impl<R: RolePolicy> WebSocket<R> {
     /// as an [`Event::Pong`].
     /// # Errors
     /// If the peer has disconnected or we are currently closing, this function returns an error.
-    pub async fn ping(&self) -> Result<Bytes> {
+    pub async fn ping(&self) -> Result<Vec<u8>> {
         let nonce = self.inner.ping_stats.lock().await.new_nonce();
-        let f = ControlFrame::<R>::ping(&nonce);
-        self.ctrl_tx.send(f.encode()).await
+        self.ctrl_tx.send(control::ping::<R>(&nonce)).await
     }
 
     /// Returns the peer socket address.
@@ -241,7 +239,6 @@ impl<R: RolePolicy> WebSocket<R> {
                     handler.on_close().await;
                     break;
                 }
-                Event::Error(e) => handler.on_error(e).await,
                 Event::Pong(latency) => handler.on_pong(latency).await,
             }
         }
@@ -294,8 +291,8 @@ impl<R: RolePolicy> WebSocket<R> {
     }
 
     pub(crate) fn writer_loop<S: AsyncWrite + Send + 'static>(
-        mut close_rx: Receiver<Bytes>,
-        mut ctrl_rx: Receiver<Bytes>,
+        mut close_rx: Receiver<Vec<u8>>,
+        mut ctrl_rx: Receiver<Vec<u8>>,
         mut data_rx: Receiver<Bytes>,
         mut writer: WriteHalf<S>,
     ) {
@@ -350,11 +347,10 @@ impl<R: RolePolicy> WebSocket<R> {
                     // send ping
                     tracing::trace!("interval exceeded, sending ping");
                     let nonce = inner.ping_stats.lock().await.new_nonce();
-                    let frame = ControlFrame::<R>::ping(&nonce).encode();
+                    let frame = control::ping::<R>(&nonce);
 
-                    if let Err(e) = sender.ctrl(frame).await {
+                    if sender.ctrl(frame).await.is_err() {
                         tracing::warn!("Ping failed, stopping ping loop.");
-                        let _ = sender.event(Event::Error(e.0)).await;
                         break;
                     }
                     ping_sent = Some(Instant::now());
@@ -363,10 +359,7 @@ impl<R: RolePolicy> WebSocket<R> {
                 {
                     // send close
                     let _ = sender
-                        .close(ControlFrame::<R>::close_reason(
-                            CloseReason::Policy,
-                            "ping timed out",
-                        ))
+                        .close(control::close::<R>(CloseReason::Policy, "ping timed out"))
                         .await;
                 }
 
@@ -439,7 +432,7 @@ impl<R: RolePolicy> WebSocket<R> {
                             tracing::warn!("protocol violation detected, entering closing state");
                             inner.closing.store(true, Ordering::Release);
                             let _ = sender
-                                .close(ControlFrame::<R>::close_reason(
+                                .close(control::close::<R>(
                                     CloseReason::ProtoError,
                                     "There was a ws protocol violation.",
                                 ))
@@ -451,7 +444,7 @@ impl<R: RolePolicy> WebSocket<R> {
                             tracing::warn!("size error detected, entering closing state");
                             inner.closing.store(true, Ordering::Release);
                             let _ = sender
-                                .close(ControlFrame::<R>::close_reason(
+                                .close(control::close::<R>(
                                     CloseReason::TooBig,
                                     "Frame exceeded maximum size",
                                 ))

@@ -17,13 +17,13 @@ watch p=port:
     done
 
 autobahn:
-    just server 9001 --features=autobahn
+    just server 9001 --features=autobahn,simd_masking
 
 server p=port args="":
     cargo r --bin server {{args}} -- -p {{p}}
 
 client p=port:
-    cargo r --bin client -- -p {{p}}
+    cargo r --bin client --features=autobahn,simd_masking -- -p {{p}}
 
 flame:
     RUSTFLAGS="-C force-frame-pointers=yes" cargo b --release
