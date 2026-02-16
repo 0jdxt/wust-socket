@@ -2,17 +2,19 @@ use std::io::Write;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use flate2::write::DeflateEncoder;
+use tokio::sync::mpsc::{Sender, error::SendError};
 
 use super::Opcode;
-use crate::{role::RolePolicy, MAX_FRAME_PAYLOAD, MAX_MESSAGE_SIZE};
+use crate::{MAX_FRAME_PAYLOAD, MAX_MESSAGE_SIZE, role::RolePolicy};
 
 // DataFrames may be fragmented or very large hence they need extra processing compared to ControlFrames
-pub(crate) fn data<R: RolePolicy>(
+pub(crate) async fn data<R: RolePolicy>(
+    data_tx: &Sender<Bytes>,
     payload: &[u8],
     opcode: Opcode,
     deflater: &mut Option<DeflateEncoder<Vec<u8>>>,
     use_context: bool,
-) -> Bytes {
+) -> Result<(), SendError<Bytes>> {
     if let Some(deflater) = deflater {
         let init_size = payload.len();
 
@@ -30,32 +32,36 @@ pub(crate) fn data<R: RolePolicy>(
         let b = &deflater.get_ref()[end..];
         tracing::trace!("deflated {init_size} -> {}", b.len());
 
-        all_frames::<R>(opcode, b, true)
+        all_frames::<R>(data_tx, opcode, b, true).await
     } else {
-        all_frames::<R>(opcode, payload, false)
+        all_frames::<R>(data_tx, opcode, payload, false).await
     }
 }
 
-fn all_frames<R: RolePolicy>(opcode: Opcode, payload: &[u8], compressed: bool) -> Bytes {
+async fn all_frames<R: RolePolicy>(
+    data_tx: &Sender<Bytes>,
+    opcode: Opcode,
+    payload: &[u8],
+    compressed: bool,
+) -> Result<(), SendError<Bytes>> {
     let mut first = true;
-    let mut chunks = BytesMut::with_capacity(MAX_MESSAGE_SIZE);
+    let mut buf = BytesMut::with_capacity(MAX_MESSAGE_SIZE);
 
-    // TODO: if remainder empty, set last frame properly
     let (chunked, remainder) = payload.as_chunks::<MAX_FRAME_PAYLOAD>();
 
-    for chunk in chunked {
-        single_frame::<R>(&mut chunks, opcode, chunk, &mut first, false, compressed);
-    }
-    if remainder.is_empty() {
-        if !chunks.is_empty() {
-            let idx = chunks.len() - payload.len().min(MAX_FRAME_PAYLOAD) - 1;
-            chunks[idx] |= 0x80;
-        }
-    } else {
-        single_frame::<R>(&mut chunks, opcode, remainder, &mut first, true, compressed);
+    for (i, chunk) in chunked.iter().enumerate() {
+        let last = remainder.is_empty() && i == chunked.len() - 1;
+        single_frame::<R>(&mut buf, opcode, chunk, &mut first, last, compressed);
+        data_tx.send(buf.split().freeze()).await?;
+        buf.clear();
     }
 
-    chunks.freeze()
+    // if there is a remainder, send as last or if empty payload, send empty
+    if !remainder.is_empty() || payload.is_empty() {
+        single_frame::<R>(&mut buf, opcode, remainder, &mut first, true, compressed);
+        data_tx.send(buf.freeze()).await?;
+    }
+    Ok(())
 }
 
 fn single_frame<R: RolePolicy>(
@@ -75,16 +81,11 @@ fn single_frame<R: RolePolicy>(
         "encoding DATA"
     );
 
-    // if first, opcode, else CONT
     let mut b1 = if *first { opcode } else { Opcode::Cont } as u8;
-    // set FIN if last
-    b1 |= if last { 0b1000_0000 } else { 0 };
-    // set RSV1 if first and compressed
-    b1 |= if *first && compressed { 0b0100_0000 } else { 0 };
-    // NB: only change once we are done with first
-    *first = false;
-
+    b1 |= if last { 0b1000_0000 } else { 0 }; // set FIN
+    b1 |= if *first && compressed { 0b0100_0000 } else { 0 }; // set RSV1
     buf.put_u8(b1);
+    *first = false; // change AFTER pushing b1
 
     // push LEN
     #[allow(clippy::cast_possible_truncation)]
@@ -102,8 +103,7 @@ fn single_frame<R: RolePolicy>(
 
     // Clients must SEND masked
     if R::CLIENT {
-        // set MASK bit
-        buf[1] |= 0x80;
+        buf[1] |= 0x80; // set MASK bit
         // get random bytes and push to buf
         let mut mask_key = [0; 4];
         rand::fill(&mut mask_key);
@@ -121,8 +121,11 @@ fn single_frame<R: RolePolicy>(
 #[cfg(test)]
 mod bench {
     extern crate test;
+    use std::hint::black_box;
+
     use paste::paste;
-    use test::{black_box, Bencher};
+    use test::Bencher;
+    use tokio::sync::{Mutex, mpsc::channel};
 
     use super::*;
     use crate::role::*;
@@ -132,20 +135,27 @@ mod bench {
 
     fn bench_data_frame<R: RolePolicy>(b: &mut Bencher, payload_len: usize) {
         let payload = make_payload(payload_len);
-        b.iter(|| {
-            let frame = data::<R>(&payload, Opcode::Text, &mut None, false);
-            let bb = black_box(frame);
-            black_box(bb.len()); // consume so compiler can't optimize away
+        let (tx, rx) = channel(1);
+        let rx = Mutex::new(rx);
+        b.iter(async || {
+            data::<R>(&tx, &payload, Opcode::Text, &mut None, false)
+                .await
+                .unwrap();
+            while let Some(bytes) = rx.lock().await.recv().await {
+                black_box(bytes);
+            }
         });
     }
 
     macro_rules! bench_data_sizes {
     ($($len:expr),* $(,)?) => {
         $(paste!{
-            #[bench] fn [<bench_client_ $len>](b: &mut Bencher) {
+            #[bench]
+            fn [<bench_client_ $len>](b: &mut Bencher) {
                 bench_data_frame::<Client>(b, $len);
             }
-            #[bench] fn [<bench_server_ $len>](b: &mut Bencher) {
+            #[bench]
+            fn [<bench_server_ $len>](b: &mut Bencher) {
                 bench_data_frame::<Server>(b, $len);
             }
         })*

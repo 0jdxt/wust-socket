@@ -23,7 +23,7 @@ use tokio::{
     time::interval,
 };
 
-use super::frame_handler::handle_frame;
+use super::{event::Text, frame_handler::handle_frame};
 use crate::{
     Event, MAX_FRAME_PAYLOAD, UpgradeError,
     error::CloseReason,
@@ -55,18 +55,21 @@ pub(crate) struct Inner {
 
 /// Message to be sent over the websocket.
 pub enum Message {
-    Text(Bytes),
+    Text(String),
     Binary(Bytes),
 }
 
 impl Message {
     #[must_use]
-    pub fn text(s: &str) -> Self { Self::Text(Bytes::from(s.to_string())) }
+    pub fn text(s: String) -> Self { Self::Text(s) }
+
+    #[must_use]
+    pub fn binary(b: &[u8]) -> Self { Self::Binary(BytesMut::from(b).freeze()) }
 }
 
 #[async_trait::async_trait]
 pub trait MessageHandler: Send + Sync + 'static {
-    async fn on_text(&self, s: Bytes) -> Option<Message>;
+    async fn on_text(&self, s: Text) -> Option<Message>;
     async fn on_binary(&self, b: Bytes) -> Option<Message>;
     async fn on_close(&self);
     async fn on_error(&self);
@@ -174,14 +177,14 @@ impl<R: RolePolicy> WebSocket<R> {
     }
 
     async fn send_data(&mut self, bytes: &[u8], opcode: Opcode) -> Result<Bytes> {
-        self.data_tx
-            .send(data::<R>(
-                bytes,
-                opcode,
-                &mut self.deflater,
-                self.use_context,
-            ))
-            .await
+        data::<R>(
+            &self.data_tx,
+            bytes,
+            opcode,
+            &mut self.deflater,
+            self.use_context,
+        )
+        .await
     }
 
     /// Request close from peer and close the connection.
@@ -247,7 +250,7 @@ impl<R: RolePolicy> WebSocket<R> {
     async fn handle_ws_message(&mut self, msg: Option<Message>) {
         match msg {
             Some(Message::Text(s)) => {
-                if let Err(e) = self.send_data(&s, Opcode::Text).await {
+                if let Err(e) = self.send_data(s.as_bytes(), Opcode::Text).await {
                     tracing::error!(e = ?e, "failed to send text message");
                 }
             }

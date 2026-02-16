@@ -65,8 +65,8 @@ async fn main() -> Result<(), SendError<Bytes>> {
                 break;
             }
             Event::Pong(n) => println!("PONG: {n}ms"),
-            Event::Text(b) => {
-                let s = unsafe { str::from_utf8_unchecked(&b) };
+            Event::Text(t) => {
+                let s = t.as_str();
                 let l = s.ceil_char_boundary(200);
                 println!("got message T {} {:?}", s.len(), &s[..l]);
             }

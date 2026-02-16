@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::{fmt::Display, io::Write};
 
 use bytes::{Bytes, BytesMut};
 use flate2::write::DeflateDecoder;
@@ -12,11 +12,35 @@ pub enum Event {
     /// Pong event with its latency in milliseconds.
     Pong(u16),
     /// Valid UTF-8 message.
-    Text(Bytes),
+    Text(Text),
     /// Binary message bytes.
     Binary(Bytes),
     /// The connection to the websocket has been closed.
     Closed,
+}
+
+// UTF-8 validated bytes
+#[derive(Debug)]
+pub struct Text {
+    inner: Bytes,
+}
+
+impl Text {
+    pub fn as_str(&self) -> &str { unsafe { str::from_utf8_unchecked(&self.inner) } }
+
+    pub fn len(&self) -> usize { self.inner.len() }
+
+    pub fn is_empty(&self) -> bool { self.inner.is_empty() }
+
+    pub fn as_bytes(&self) -> &[u8] { &self.inner }
+
+    pub fn into_bytes(self) -> Bytes { self.inner }
+}
+
+impl Display for Text {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 impl Event {
@@ -92,7 +116,7 @@ impl PartialMessage {
             if str::from_utf8(&data).is_err() {
                 return Err(MessageError::Utf8);
             }
-            Ok(Event::Text(data))
+            Ok(Event::Text(Text { inner: data }))
         } else {
             Ok(Event::Binary(data))
         }
